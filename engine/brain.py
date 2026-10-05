@@ -538,7 +538,9 @@ class Brain:
         bonf = self.max_p / self.k
         conf, ig_all = ev["conf"], ev["ig_all"]
         roi_pct = ev["roi_pct"]
-        p_roi = max(ev["roi_p_value"], 1.0) if roi_pct <= 0 else ev["roi_p_value"]
+        # a non-positive paper trade is not "unsignificant", it is disqualifying,
+        # so its p-value is pinned to 1.0 rather than reported as something small
+        p_roi = ev["roi_p_value"] if roi_pct > 0 else 1.0
         p_roi_rec = ev["roi_recent_p_value"]
         p_edge_best = min(ev["p_edge"], ev["p_edge_recent"])
 
@@ -579,8 +581,40 @@ class Brain:
 
         if ok_conf and ok_roi_strict and ok_oos:
             return "commit", 1.0, [], reasons
-        if ok_conf and (ok_roi or (roi_pct > 0 and p_edge_best <= self.max_p)):
-            return (self.provisional_tier, self.provisional_scale, blockers, reasons)
+
+        # ------------------------------------------------- topping up to a stake
+        # Failing the commit bar does not automatically mean "pass": there are
+        # two independent ways to be right, and requiring both is too strict.
+        #
+        #   (a) the colour you back comes in more often than its break-even
+        #       rate  -> profitable regardless of how sharp your probabilities are
+        #   (b) your probabilities are sharper than uniform  -> the paper trade
+        #       proves it with money
+        #
+        # Either can be real on its own, so a stake is licensed by ONE line of
+        # evidence that survives the Bonferroni correction for the k colours we
+        # inspect every single turn.
+        #
+        # What must NOT license a stake is a signal that only passes at the
+        # UNCORRECTED 5% bar. That bar is evaluated every turn and across every
+        # colour, so on a fair game it fires constantly and the small "hedged"
+        # positions compound into ruinous variance — measured at 74-82% peak
+        # drawdowns on simulated fair games. Marginal evidence buys nothing.
+        #
+        # So: a stake requires at least one line of evidence that survives the
+        # Bonferroni correction, and (because backing your own favourite at a
+        # loss is self-refuting whatever the frequency says) a paper trade that
+        # is not negative.
+        roi_corrected = p_roi <= bonf                       # money says yes, corrected
+        freq_corrected = roi_pct >= 0 and p_edge_best <= bonf  # frequency says yes, corrected
+        if ok_conf and (roi_corrected or freq_corrected):
+            return self.provisional_tier, self.provisional_scale, blockers, reasons
+
+        if ok_conf and min(p_roi, p_edge_best) <= self.max_p:
+            blockers.append(
+                f"the only supporting evidence is uncorrected (p="
+                f"{min(p_roi, p_edge_best):.4f}, needs {bonf:.4f} across {self.k} "
+                f"colours) — it would fire on a fair game too, so no stake")
         return "pass", 0.0, blockers, reasons
 
     # --------------------------------------------------------------- predict

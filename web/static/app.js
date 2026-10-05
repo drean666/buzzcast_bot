@@ -2,6 +2,7 @@
 'use strict';
 
 const $  = (s, r = document) => r.querySelector(s);
+const st_symbols = () => (S.state && S.state.symbols) || ['r', 'b', 'g'];
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -235,6 +236,7 @@ function render() {
         <td class="num tiny dim">${r.consecutive_losses_to_bust != null ? r.consecutive_losses_to_bust + ' losses' : '—'}</td>
       </tr>`).join('') + '</tbody>';
   }
+  if (st.trend) renderTrends();
   if (st.patterns) { $('#patterns-table').innerHTML = patternTable(st.patterns); }
   if (st.patterns3) { $('#patterns3-table').innerHTML = patternTable(st.patterns3); }
 
@@ -422,6 +424,15 @@ function wire() {
     await api('/api/cancel', {}); await refresh();
   }, 'bet cancelled — nothing was staked');
 
+  const stakeTrend = $('#btn-stake-trend');
+  if (stakeTrend) stakeTrend.onclick = () => {
+    const pair = S.state.trend.current.pair || [];
+    st_symbols().forEach(s => S.ui.stakes[s] = 0);
+    pair.forEach(s => S.ui.stakes[s] = Number(S.state.capital.default_split_stake) || 120);
+    S.ui.follow = 'mine';
+    renderStakes(); renderPreview();
+    toast('staked both trend colours — enter the result when it lands');
+  };
   $('#btn-copy-bot').onclick = () => {
     const bb = S.state.prediction.bet;
     Object.keys(bb.stakes).forEach(s => S.ui.stakes[s] = bb.stakes[s]);
@@ -500,6 +511,99 @@ function wire() {
   });
 }
 
+const POLICY_LABELS = { bot: 'bot (follow the button)', bot_strict: 'bot, commitments only',
+  bot_loose: 'bot, ignore the gate', split_two: 'fixed split (yours)',
+  always_top: 'all on the favourite', fixed_colour: 'all on one colour',
+  martingale: 'Martingale', random: 'random colour', mirror_you: 'mirror your own bets',
+  trend2: 'your trend bet', trend2_weighted: 'trend bet, weighted to the hotter colour' };
+const SOURCE_LABELS = { fair: 'fair (no edge exists)', biased: 'biased (real base-rate edge)',
+  markov: 'markov (thin, real streak)', markov_strong: 'markov_strong (big edge)',
+  replay: 'replay (your results)', custom: 'custom probabilities' };
+
+function fillSelect(sel, labels, selected) {
+  const node = typeof sel === 'string' ? $(sel) : sel;
+  if (!node || node.dataset.filled === '1') return;
+  node.innerHTML = Object.keys(labels).map(k =>
+    `<option value="${k}"${k === selected ? ' selected' : ''}>${esc(labels[k])}</option>`).join('');
+  node.dataset.filled = '1';
+}
+
+function populateSimSelects() {
+  fillSelect('#sim-source', SOURCE_LABELS, 'fair');
+  fillSelect('#sim-policy', POLICY_LABELS, 'bot');
+  fillSelect('#auto-source', SOURCE_LABELS, 'biased');
+}
+
+
+/* ---------------------------------------------------------------- trends */
+/* Measured: 60 runs x 600 turns from 1,000 coins, 150 on each of two colours. */
+const TREND_RISK = [
+  ['fair (no memory)',          9,   915, 0,    52, 990,  997,  0],
+  ['biased 44% (no memory)',   10,  3422, 0,    50, 32770, 38197, 0],
+  ['markov (real memory)',   7530,  6488, 0,    28, 3370, 14765, 0],
+  ['markov_strong (big edge)', 16120, 14099, 0, 12, 149740, 146791, 0],
+];
+
+function renderTrends() {
+  const t = S.state.trend;
+  if (!t) { $('#trend-current').innerHTML = '<span class="mut">no data yet</span>'; return; }
+  const cur = t.current, o = t.overall;
+  const chips = (cur.covered || []).map(s =>
+    `<span class="chip ${esc(s)}">${esc(nameOf(s))}</span>`).join(' ');
+  $('#trend-current').innerHTML = `
+    <div class="row between">
+      <div><span class="small mut">current run</span>
+        <div style="font-size:20px;font-weight:600;margin-top:2px">${cur.run} turn${cur.run === 1 ? '' : 's'} ${chips}</div></div>
+      <div style="text-align:right"><span class="small mut">pair held</span>
+        <div class="v num" style="font-size:20px">${o.continued_pct.toFixed(1)}%</div>
+        <div class="tiny dim">need ${o.break_even_pct}%</div></div>
+    </div>
+    <div class="small mut" style="margin-top:8px">${esc(cur.message)}</div>
+    ${cur.pair && cur.pair.length ? `<div class="row" style="margin-top:10px">
+      <button class="small" id="btn-stake-trend">stake ${S.state.trend.stake_hint || 120} on each of ${cur.pair.map(x => esc(nameOf(x))).join(' + ')}</button>
+    </div>` : ''}`;
+
+  $('#trend-table').innerHTML = t.rows.length ? `
+    <div class="small mut" style="margin-bottom:8px">
+      ${o.n} trend turns measured. Does a longer run predict better?
+    </div>
+    <table><thead><tr><th>run length</th><th>turns</th><th>pair held</th>
+      <th>vs 66.7% needed</th><th>p</th><th></th></tr></thead><tbody>
+    ${t.rows.map(r => `<tr>
+      <td>${r.run === t.rows[t.rows.length - 1].run ? r.run + '+' : r.run}</td>
+      <td class="num">${r.n}</td>
+      <td class="num">${r.continued_pct.toFixed(1)}%</td>
+      <td class="num ${cls(r.edge_pct)}">${r.edge_pct >= 0 ? '+' : ''}${r.edge_pct.toFixed(1)}%</td>
+      <td class="num">${r.p_value.toFixed(4)}</td>
+      <td>${r.significant ? '<span class="tiny pos">significant</span>' : '<span class="tiny dim">noise</span>'}</td>
+    </tr>`).join('')}</tbody></table>` :
+    '<span class="mut">not enough results yet</span>';
+
+  const real = o.p_value <= 0.05 && o.continued_pct > 66.67;
+  const bad = o.p_value <= 0.05 && o.continued_pct < 66.67;
+  $('#trend-verdict').innerHTML = `<div class="callout${real ? '' : ' info'}">
+    <b>${real ? 'Your trend bet is working here' : bad ? 'Runs are breaking early here' : 'No memory detected'}</b><br>
+    ${esc(t.verdict)}</div>`;
+
+  $('#trend-risk-table').innerHTML =
+    `<thead><tr><th>source</th><th>trend bet: median</th><th>trend mean</th>
+      <th>trend ruined</th><th>bot: median</th><th>bot mean</th><th>bot ruined</th></tr></thead><tbody>`
+    + TREND_RISK.map(r => `<tr>
+        <td>${esc(r[0])}</td>
+        <td class="num neg"><b>${money(r[1])}</b></td><td class="num">${money(r[2])}</td>
+        <td class="num ${r[4] > 20 ? 'neg' : 'mut'}">${r[4]}%</td>
+        <td class="num pos"><b>${money(r[5])}</b></td><td class="num">${money(r[6])}</td>
+        <td class="num pos">${r[7]}%</td>
+      </tr>`).join('') + '</tbody>'
+    + `<tfoot><tr><td colspan="7" class="small mut" style="text-align:left;padding-top:10px">
+        On a fair game the trend bet's <b>median</b> outcome is ${money(9)} out of ${money(1000)},
+        because 300 per turn on a 1,000 bankroll is 30% exposure: the odds are exactly fair, but
+        the <i>size</i> is fatal. The bot's refusal to bet is worth more than any trend.
+        On games with real memory the same strategy does work — so the question is never
+        "is there a trend?", it is "does this game have memory?" — which is what the test above answers.
+      </td></tr></tfoot>`;
+}
+
 function renderSim(r) {
   const ok = r.ruined ? 'neg' : r.roi_pct > 0 ? 'pos' : 'mut';
   $('#sim-result').innerHTML = `
@@ -572,7 +676,7 @@ function renderConfig() {
 }
 
 /* ---------------------------------------------------------------- boot */
-refresh().then(wire).catch(e => {
+refresh().then(() => { populateSimSelects(); wire(); }).catch(e => {
   document.body.insertAdjacentHTML('afterbegin',
     `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
 });

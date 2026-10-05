@@ -1,0 +1,457 @@
+From 39875517c04b99103f501df9ec522b60b07b137a Mon Sep 17 00:00:00 2001
+From: buzzcast <you@example.com>
+Date: Mon, 5 Oct 2026 12:53:07 +0000
+Subject: [PATCH] 2.1: close two ways the honesty gate could be bypassed
+
+Found while auditing whether the gate was too permissive on thin evidence.
+
+1. "Follow the bot" ignored the gate entirely (serious)
+   place_bet() applied the tier's stake multiplier only in the provisional
+   case, so following the bot on a `pass` tier placed a full Kelly stake
+   while the bot was telling you to sit the turn out. The gate itself was
+   correct; the click a user actually makes went around it. The original
+   suite could not see this because every test gates on pred["committed"]
+   before calling place_bet - verified by reintroducing the bug, which left
+   32/34 tests green. Two new tests exercise the click directly.
+   Concretely: 74-82% peak drawdowns on simulated fair games, vs 0-24% now.
+
+2. Provisional stakes were licensed by uncorrected evidence
+   A signal clearing only the ordinary 5% bar could buy a hedged position.
+   That bar is evaluated every turn and against every colour, so it fires
+   constantly on a fair game and the hedges compound into ruinous variance.
+   A stake now requires one line of evidence that survives the Bonferroni
+   correction (or a corrected-frequency edge with a non-negative paper
+   trade). Marginal evidence buys nothing.
+   This also sends the old 70-result archive to `pass` instead of a hedged
+   bet: its 3.4% lean fails the corrected bar and its compression edge is
+   negative, i.e. two weak signals pointing opposite ways.
+
+Kept deliberately: a real edge is still found everywhere it exists
+(biased 1k->48k, markov_strong 1k->72k, thin markov 1k->150k over 2000
+turns), and a negative compression edge does NOT by itself block a stake -
+a badly calibrated model can still have a profitable favourite, so requiring
+both lines of evidence would block real bets.
+
+Also:
+- simulate: `bot` now mirrors the button exactly (tier scale included);
+  added `bot_strict` for commitments only. The lab and live play can no
+  longer drift apart.
+- UI: the Simulation-lab dropdowns were never populated (blank values on
+  submit); now filled from labelled source/policy lists including bot_strict.
+- README: documents the corrected-evidence rule and both bugs.
+
+34 tests, in ~5s.
+---
+ README.md          | 31 +++++++++++----
+ engine/__init__.py |  2 +-
+ engine/brain.py    | 40 +++++++++++++++++--
+ engine/game.py     | 29 ++++++++++----
+ engine/simulate.py | 23 ++++++++---
+ tests.py           | 99 +++++++++++++++++++++++++++++++++++++++++++---
+ web/server.py      |  5 ++-
+ web/static/app.js  | 24 ++++++++++-
+ 8 files changed, 220 insertions(+), 33 deletions(-)
+
+diff --git a/README.md b/README.md
+index 15275dd..2ee518b 100644
+--- a/README.md
++++ b/README.md
+@@ -114,7 +114,9 @@ in which it is quietly confident.
+ 
+ That gate is what `test_brain_rejects_fair_game` protects: across 4,500 turns
+ of genuinely random results it must commit **zero** times, and on the weaker
+-Markov source it must hedge rather than bet hard.
++Markov source it must hedge rather than bet hard. `test_no_stake_without_
++corrected_evidence` pins the specific dataset that motivated the rule — the
++old 70 results — and asserts it cannot buy a live position.
+ 
+ **4. It keeps score on you.** A meta-learner tracks your hit rate against the
+ bot's with confidence intervals, and answers "who should I be following?" with
+@@ -139,13 +141,16 @@ betting math against synthetic results with known ground truth:
+ | `replay` | your own recorded results, looped | learn from what you have |
+ | `custom` | probabilities you type in | — |
+ 
+-Strategies include the bot, a fixed split, always-on-the-favourite, covering
+-all three, Martingale, random, and `mirror_you` — which replays your own
+-recorded stake vectors so you can ask "what if I had kept playing like that?"
++Strategies include `bot` (the follow-the-button policy, hedges included),
++`bot_strict` (full-size commitments only), a fixed split, always-on-the-
++favourite, covering all three, Martingale, random, and `mirror_you` — which
++replays your own recorded stake vectors so you can ask "what if I had kept
++playing like that?"
+ 
+ Run the whole grid and read the **ruin rate** column first. On `fair`, every
+ strategy that keeps betting eventually dies, and Martingale dies fastest.
+-That is the entire lesson of the game in one table.
++That is the entire lesson of the game in one table. The bot is the only line
++that survives it — by declining to play.
+ 
+ You can also **fast-forward the live ledger**: same engine, same learning,
+ results auto-generated, so your actual bankroll and the bot's own record move.
+@@ -177,9 +182,19 @@ almost immediately and compounds hard.
+   uses only results 0…*i*−1, including the info-gain figure and the paper
+   trade. The backtest replays those recorded decisions rather than
+   recalculating them with hindsight.
+-- **Multiple comparisons are corrected.** The gate runs every turn and watches
+-  every colour, so it uses α/k. Without that, a fair game would manufacture a
+-  "pattern" every twenty turns.
++- **Multiple comparisons are corrected, and correction is the price of entry.**
++  The gate runs every turn and watches every colour, so it uses α/k — and no
++  stake of any size is offered on evidence that fails that corrected bar.
++  Without it, a fair game manufactures a "pattern" every twenty turns and the
++  hedges on those false positives produce 74–82% drawdowns.
++- **A negative paper trade is disqualifying, not merely unsignificant.** If
++  backing your own favourite has lost money, your favourite is not a bet,
++  whatever a frequency test says.
++- **Two independent ways to be right.** Requiring both a base-rate edge *and*
++  a sharp probability distribution would block real bets — a model can be
++  badly calibrated and still have a profitable favourite. So either line of
++  evidence can license a hedge on its own; the strict commit bar still needs
++  the full package.
+ - **Zero-variance samples are handled.** A record with no variance and a
+   positive mean is the strongest evidence there is; a naive t-test reports it
+   as p = 0.50. `_p_from` special-cases it.
+diff --git a/engine/__init__.py b/engine/__init__.py
+index a64d8ee..c3f75bd 100644
+--- a/engine/__init__.py
++++ b/engine/__init__.py
+@@ -14,6 +14,6 @@ game.py       GameEngine — the ledger is the single source of truth
+ simulate.py   headless auto-play / replay lab
+ """
+ 
+-__version__ = "2.0.0"
++__version__ = "2.1.0"
+ 
+ from .settings import Settings, base_dir  # noqa: F401
+diff --git a/engine/brain.py b/engine/brain.py
+index 028562c..2760577 100644
+--- a/engine/brain.py
++++ b/engine/brain.py
+@@ -538,7 +538,9 @@ class Brain:
+         bonf = self.max_p / self.k
+         conf, ig_all = ev["conf"], ev["ig_all"]
+         roi_pct = ev["roi_pct"]
+-        p_roi = max(ev["roi_p_value"], 1.0) if roi_pct <= 0 else ev["roi_p_value"]
++        # a non-positive paper trade is not "unsignificant", it is disqualifying,
++        # so its p-value is pinned to 1.0 rather than reported as something small
++        p_roi = ev["roi_p_value"] if roi_pct > 0 else 1.0
+         p_roi_rec = ev["roi_recent_p_value"]
+         p_edge_best = min(ev["p_edge"], ev["p_edge_recent"])
+ 
+@@ -579,8 +581,40 @@ class Brain:
+ 
+         if ok_conf and ok_roi_strict and ok_oos:
+             return "commit", 1.0, [], reasons
+-        if ok_conf and (ok_roi or (roi_pct > 0 and p_edge_best <= self.max_p)):
+-            return (self.provisional_tier, self.provisional_scale, blockers, reasons)
++
++        # ------------------------------------------------- topping up to a stake
++        # Failing the commit bar does not automatically mean "pass": there are
++        # two independent ways to be right, and requiring both is too strict.
++        #
++        #   (a) the colour you back comes in more often than its break-even
++        #       rate  -> profitable regardless of how sharp your probabilities are
++        #   (b) your probabilities are sharper than uniform  -> the paper trade
++        #       proves it with money
++        #
++        # Either can be real on its own, so a stake is licensed by ONE line of
++        # evidence that survives the Bonferroni correction for the k colours we
++        # inspect every single turn.
++        #
++        # What must NOT license a stake is a signal that only passes at the
++        # UNCORRECTED 5% bar. That bar is evaluated every turn and across every
++        # colour, so on a fair game it fires constantly and the small "hedged"
++        # positions compound into ruinous variance — measured at 74-82% peak
++        # drawdowns on simulated fair games. Marginal evidence buys nothing.
++        #
++        # So: a stake requires at least one line of evidence that survives the
++        # Bonferroni correction, and (because backing your own favourite at a
++        # loss is self-refuting whatever the frequency says) a paper trade that
++        # is not negative.
++        roi_corrected = p_roi <= bonf                       # money says yes, corrected
++        freq_corrected = roi_pct >= 0 and p_edge_best <= bonf  # frequency says yes, corrected
++        if ok_conf and (roi_corrected or freq_corrected):
++            return self.provisional_tier, self.provisional_scale, blockers, reasons
++
++        if ok_conf and min(p_roi, p_edge_best) <= self.max_p:
++            blockers.append(
++                f"the only supporting evidence is uncorrected (p="
++                f"{min(p_roi, p_edge_best):.4f}, needs {bonf:.4f} across {self.k} "
++                f"colours) — it would fire on a fair game too, so no stake")
+         return "pass", 0.0, blockers, reasons
+ 
+     # --------------------------------------------------------------- predict
+diff --git a/engine/game.py b/engine/game.py
+index 8df7ee2..97148e2 100644
+--- a/engine/game.py
++++ b/engine/game.py
+@@ -172,13 +172,15 @@ class GameEngine:
+     def _advice(self, pred, bot_bet: Dict[str, Any]) -> str:
+         t = self.meta.trust()
+         v = t["verdict"]
+-        if pred.committed and bot_bet.get("total"):
+-            core = (f"BOT BETS {int(bot_bet['total'])}: " +
+-                    " + ".join(f"{int(v2)} {s.upper()}"
+-                               for s, v2 in bot_bet["stakes"].items() if v2 > 0))
+-        else:
++        if pred.tier == "pass" or not bot_bet.get("total"):
+             core = "BOT PASSES — " + (pred.blockers[0] if pred.blockers
+                                       else "no positive edge at these prices")
++        else:
++            stake = bot_bet["total"] * float(pred.kelly_scale)
++            label = "BOT HEDGES" if pred.tier == "provisional" else "BOT BETS"
++            core = (f"{label} {int(round(stake))}: " +
++                    " + ".join(f"{int(v2 * pred.kelly_scale)} {s.upper()}"
++                               for s, v2 in bot_bet["stakes"].items() if v2 > 0))
+         return f"{core}  |  meta-learner: {v} ({t['why']})"
+ 
+     # ------------------------------------------------------------- betting
+@@ -224,10 +226,21 @@ class GameEngine:
+                                        self.capital, self._bet_cfg())
+         my = self.validate_bet(stakes or {})[0]
+         if follow == "bot":
+-            raw = {s: float(v) for s, v in bot_bet["stakes"].items()}
+-            if pred.tier == "provisional":
+-                raw = {s: v * pred.kelly_scale for s, v in raw.items()}
++            # kelly_scale is the gate made concrete: 1.0 when the bot commits,
++            # a fraction when it hedges, and exactly 0 when it says pass. It
++            # must be applied for EVERY tier — an earlier version only scaled
++            # the provisional case, which meant "follow the bot" quietly placed
++            # a full Kelly stake while the bot was telling you to sit the turn
++            # out. That single bug defeated the entire honesty gate.
++            raw = {s: float(v) * float(pred.kelly_scale)
++                   for s, v in bot_bet["stakes"].items()}
+             played, w = self.validate_bet(raw)
++            if pred.tier == "pass":
++                w = ["the bot says PASS this turn, so following it means no stake",
++                     *w]
++            elif pred.tier == "provisional":
++                w = [f"bot is hedging: staked {int(100 * pred.kelly_scale)}% of its "
++                     f"normal size", *w]
+         elif follow == "blend":
+             mix = {s: 0.5 * (my.get(s, 0) + float(bot_bet["stakes"].get(s, 0)))
+                    for s in self.symbols}
+diff --git a/engine/simulate.py b/engine/simulate.py
+index 7574fbf..ba9409a 100644
+--- a/engine/simulate.py
++++ b/engine/simulate.py
+@@ -19,7 +19,10 @@ Sources
+     custom         probabilities you supply
+ 
+ Policies
+-    bot            follow the brain, but only when the honesty gate commits
++    bot            follow the brain exactly as the button does: full size when
++                   it commits, a hedged fraction when it is provisional, and
++                   nothing when it passes
++    bot_strict     full-size commitments only, ignore the hedges
+     bot_loose      follow the brain whenever any colour has positive EV
+     split_two      YOUR strategy: fixed stake on a fixed pair of colours
+     always_top     fixed stake on the brain's top colour, gate ignored
+@@ -176,11 +179,21 @@ def make_policy(name: str, settings: Settings, opts: Dict[str, Any]) -> Callable
+         return {s: 0 for s in symbols}
+ 
+     def policy(pred, capital: float, ctx: Dict[str, Any]) -> Dict[str, float]:
+-        if name == "bot":
+-            if not pred.committed:
++        if name in ("bot", "bot_strict"):
++            # ``bot`` mirrors the "follow the bot" button exactly: the tier's
++            # kelly_scale is the gate made concrete (1.0 / a fraction / 0.0),
++            # so the lab and live play cannot drift apart.
++            # ``bot_strict`` takes only the full-size commitments.
++            scale = float(pred.kelly_scale)
++            if name == "bot_strict":
++                if not pred.committed:
++                    return zero()
++                scale = 1.0
++            if scale <= 0:
+                 return zero()
+-            return clamp(betting.kelly_stakes(pred.probs, payouts, symbols,
+-                                              capital, bet_cfg)["stakes"], capital)
++            k = betting.kelly_stakes(pred.probs, payouts, symbols, capital, bet_cfg)
++            st = {s: float(v) * scale for s, v in k["stakes"].items()}
++            return clamp(st, capital)
+         if name == "bot_loose":
+             k = betting.kelly_stakes(pred.probs, payouts, symbols, capital, bet_cfg)
+             return clamp(k["stakes"], capital) if k.get("total") else zero()
+diff --git a/tests.py b/tests.py
+index 4c84a71..c46725d 100644
+--- a/tests.py
++++ b/tests.py
+@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
+ if HERE not in sys.path:
+     sys.path.insert(0, HERE)
+ 
++import archive_old_history                                      # noqa: E402
+ from engine import betting, simulate, stats, storage            # noqa: E402
+ from engine.brain import Brain                                  # noqa: E402
+ from engine.game import GameEngine                              # noqa: E402
+@@ -502,15 +503,103 @@ def test_trust_needs_data_before_deciding():
+     assert snap["risk"]["turns"] == 0
+ 
+ 
++
++@test
++def test_follow_bot_respects_the_gate():
++    """Following the bot must never stake MORE than the bot proposed.
++
++    This is the bug that a 31-test suite missed: the gate was correct, but the
++    "follow the bot" path applied the tier's stake multiplier only in the
++    provisional case, so on a `pass` tier it quietly placed a full Kelly stake
++    while the bot was telling you to sit the turn out. Tests that gate on
++    ``pred.committed`` before calling place_bet cannot see it, because they
++    never exercise the click a user actually makes.
++    """
++    e, s = fresh()
++    # an empty brain has no edge, so every tier must be pass and cost nothing
++    for _ in range(6):
++        pr = e.plan()
++        assert pr["tier"] == "pass", pr["tier"]
++        assert pr["kelly_scale"] == 0.0
++        p = e.place_bet(None, follow="bot")
++        assert p["stake_total"] == 0.0, \
++            f"follow-the-bot staked {p['stake_total']} on a pass tier"
++        e.resolve("r")
++    approx(e.capital, 1000.0)
++    assert len(e.session["turns"]) == 6, "the turns must still be recorded"
++    # on a genuinely profitable source the same click must stake something
++    e2, _ = fresh()
++    src = simulate.make_source("biased", e2.symbols, seed=41)
++    for _ in range(120):
++        e2.plan()
++        e2.place_bet(None, follow="bot")
++        e2.resolve(src.next())
++    assert any(t["stake_total"] > 0 for t in e2.session["turns"]), \
++        "follow-the-bot never staked on a source with a real edge"
++
++
++@test
++def test_follow_bot_never_exceeds_its_own_proposal():
++    """Whatever the tier, the followed stake is the proposal times its scale."""
++    e, s = fresh()
++    src = simulate.make_source("markov", e.symbols, seed=44)
++    for _ in range(150):
++        pr = e.plan()
++        proposed = float((pr["bet"] or {}).get("total") or 0)
++        p = e.place_bet(None, follow="bot")
++        expected = proposed * float(pr["kelly_scale"])
++        # allow rounding to the stake step and the min-stake floor
++        assert p["stake_total"] <= expected + 10 + 1e-9, \
++            (p["stake_total"], expected, pr["tier"])
++        if pr["tier"] == "pass":
++            assert p["stake_total"] == 0.0
++        e.resolve(src.next())
++
++
++@test
++def test_no_stake_without_corrected_evidence():
++    """The old 70 results must not buy a live position.
++
++    A 3.4% one-sided lean on 70 samples fails the Bonferroni bar, and the
++    model's own probabilities are worse than uniform on that data - two weak
++    signals pointing opposite ways. Marginal evidence must buy nothing.
++    """
++    s = Settings.load()
++    b = Brain(s).fit(archive_old_history.load())
++    pr = b.predict()
++    assert pr.tier == "pass", (pr.tier, pr.roi_pct, pr.p_edge)
++    assert pr.kelly_scale == 0.0
++    assert b.ig_all() < 0.0, "this dataset should measure a negative edge"
++
++
+ # -------------------------------------------------------------- simulations
+ @test
+ def test_sim_fair_game_loses_nothing_for_the_bot():
++    """On noise the bot must not COMMIT, and must not lose money either way.
++
++    Two distinct claims, tested separately: the strict policy places no bets
++    at all, while the follow-the-button policy takes its small provisional
++    hedges - which on a fair game must still average out near break-even with
++    bounded damage rather than compounding.
++    """
+     s = Settings.load()
+-    r = simulate.run("fair", "bot", 1500, s, start_capital=1000, seed=17,
+-                     opts={"stake": 120})
+-    assert r["bets"] == 0, f"bot bet {r['bets']} times on a fair game"
+-    approx(r["final_capital"], 1000.0, 1e-6)
+-    assert not r["ruined"]
++    strict = simulate.run("fair", "bot_strict", 1500, s, start_capital=1000,
++                          seed=17, opts={"stake": 120})
++    assert strict["bets"] == 0, f"bot_strict bet {strict['bets']} times on noise"
++    approx(strict["final_capital"], 1000.0, 1e-6)
++    assert not strict["ruined"]
++
++    finals = []
++    for seed in (4, 5, 6, 7, 8, 9):
++        r = simulate.run("fair", "bot", 1500, s, start_capital=1000, seed=seed,
++                         opts={"stake": 120})
++        assert r["committed_turns"] == 0, \
++            f"seed {seed}: committed {r['committed_turns']} times on a fair game"
++        assert r["max_drawdown_pct"] < 35.0, \
++            f"seed {seed}: {r['max_drawdown_pct']:.1f}% drawdown on noise"
++        finals.append(r["final_capital"])
++    avg = sum(finals) / len(finals)
++    assert 800 < avg < 1250, f"fair-game hedges drifted to {avg:.0f}: {finals}"
+ 
+ 
+ @test
+diff --git a/web/server.py b/web/server.py
+index deec241..277c8ce 100644
+--- a/web/server.py
++++ b/web/server.py
+@@ -186,8 +186,9 @@ def api_grid(app: App, body: Dict[str, Any]) -> Dict[str, Any]:
+         e = app.engine
+         out = simulate.compare(
+             sources=body.get("sources") or ["fair", "biased", "markov", "markov_strong"],
+-            policies=body.get("policies") or ["bot", "bot_loose", "split_two",
+-                                              "always_top", "fixed_colour", "martingale"],
++            policies=body.get("policies") or ["bot", "bot_strict", "bot_loose",
++                                              "split_two", "always_top",
++                                              "fixed_colour", "martingale"],
+             turns=int(body.get("turns", 500)),
+             settings=s,
+             seeds=body.get("seeds") or [1, 2],
+diff --git a/web/static/app.js b/web/static/app.js
+index 5e96435..0c0c4e0 100644
+--- a/web/static/app.js
++++ b/web/static/app.js
+@@ -500,6 +500,28 @@ function wire() {
+   });
+ }
+ 
++const POLICY_LABELS = { bot: 'bot (follow the button)', bot_strict: 'bot, commitments only',
++  bot_loose: 'bot, ignore the gate', split_two: 'fixed split (yours)',
++  always_top: 'all on the favourite', fixed_colour: 'all on one colour',
++  martingale: 'Martingale', random: 'random colour', mirror_you: 'mirror your own bets' };
++const SOURCE_LABELS = { fair: 'fair (no edge exists)', biased: 'biased (real base-rate edge)',
++  markov: 'markov (thin, real streak)', markov_strong: 'markov_strong (big edge)',
++  replay: 'replay (your results)', custom: 'custom probabilities' };
++
++function fillSelect(sel, labels, selected) {
++  const node = typeof sel === 'string' ? $(sel) : sel;
++  if (!node || node.dataset.filled === '1') return;
++  node.innerHTML = Object.keys(labels).map(k =>
++    `<option value="${k}"${k === selected ? ' selected' : ''}>${esc(labels[k])}</option>`).join('');
++  node.dataset.filled = '1';
++}
++
++function populateSimSelects() {
++  fillSelect('#sim-source', SOURCE_LABELS, 'fair');
++  fillSelect('#sim-policy', POLICY_LABELS, 'bot');
++  fillSelect('#auto-source', SOURCE_LABELS, 'biased');
++}
++
+ function renderSim(r) {
+   const ok = r.ruined ? 'neg' : r.roi_pct > 0 ? 'pos' : 'mut';
+   $('#sim-result').innerHTML = `
+@@ -572,7 +594,7 @@ function renderConfig() {
+ }
+ 
+ /* ---------------------------------------------------------------- boot */
+-refresh().then(wire).catch(e => {
++refresh().then(() => { populateSimSelects(); wire(); }).catch(e => {
+   document.body.insertAdjacentHTML('afterbegin',
+     `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
+ });
+-- 
+2.47.3
+

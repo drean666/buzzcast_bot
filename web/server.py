@@ -68,7 +68,7 @@ APP: Optional[App] = None
 
 # --------------------------------------------------------------------- routes
 def api_state(app: App, q: Dict[str, Any]) -> Dict[str, Any]:
-    include = q.get("include", ["lab", "patterns", "backtest"])
+    include = q.get("include", ["lab", "patterns", "backtest", "trend"])
     if isinstance(include, str):
         include = [x for x in include.split(",") if x]
     with app.lock:
@@ -105,7 +105,7 @@ def api_resolve(app: App, body: Dict[str, Any]) -> Dict[str, Any]:
         e = app.engine
         turn = e.resolve(str(body.get("result", "")).lower())
         return {"ok": True, "turn": GameEngine._slim(turn),
-                "state": e.state(include=("lab", "patterns", "backtest"))}
+                "state": e.state(include=("lab", "patterns", "backtest", "trend"))}
 
 
 def api_undo(app: App, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -186,8 +186,10 @@ def api_grid(app: App, body: Dict[str, Any]) -> Dict[str, Any]:
         e = app.engine
         out = simulate.compare(
             sources=body.get("sources") or ["fair", "biased", "markov", "markov_strong"],
-            policies=body.get("policies") or ["bot", "bot_loose", "split_two",
-                                              "always_top", "fixed_colour", "martingale"],
+            policies=body.get("policies") or ["bot", "bot_strict", "bot_loose",
+                                              "trend2", "trend2_weighted",
+                                              "split_two", "always_top",
+                                              "fixed_colour", "martingale"],
             turns=int(body.get("turns", 500)),
             settings=s,
             seeds=body.get("seeds") or [1, 2],

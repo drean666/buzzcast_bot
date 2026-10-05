@@ -19,7 +19,7 @@ import datetime as _dt
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import betting, stats, storage
+from . import betting, simulate, stats, storage
 from .brain import Brain
 from .settings import Settings
 from .trust import MetaLearner
@@ -172,13 +172,15 @@ class GameEngine:
     def _advice(self, pred, bot_bet: Dict[str, Any]) -> str:
         t = self.meta.trust()
         v = t["verdict"]
-        if pred.committed and bot_bet.get("total"):
-            core = (f"BOT BETS {int(bot_bet['total'])}: " +
-                    " + ".join(f"{int(v2)} {s.upper()}"
-                               for s, v2 in bot_bet["stakes"].items() if v2 > 0))
-        else:
+        if pred.tier == "pass" or not bot_bet.get("total"):
             core = "BOT PASSES — " + (pred.blockers[0] if pred.blockers
                                       else "no positive edge at these prices")
+        else:
+            stake = bot_bet["total"] * float(pred.kelly_scale)
+            label = "BOT HEDGES" if pred.tier == "provisional" else "BOT BETS"
+            core = (f"{label} {int(round(stake))}: " +
+                    " + ".join(f"{int(v2 * pred.kelly_scale)} {s.upper()}"
+                               for s, v2 in bot_bet["stakes"].items() if v2 > 0))
         return f"{core}  |  meta-learner: {v} ({t['why']})"
 
     # ------------------------------------------------------------- betting
@@ -224,10 +226,21 @@ class GameEngine:
                                        self.capital, self._bet_cfg())
         my = self.validate_bet(stakes or {})[0]
         if follow == "bot":
-            raw = {s: float(v) for s, v in bot_bet["stakes"].items()}
-            if pred.tier == "provisional":
-                raw = {s: v * pred.kelly_scale for s, v in raw.items()}
+            # kelly_scale is the gate made concrete: 1.0 when the bot commits,
+            # a fraction when it hedges, and exactly 0 when it says pass. It
+            # must be applied for EVERY tier — an earlier version only scaled
+            # the provisional case, which meant "follow the bot" quietly placed
+            # a full Kelly stake while the bot was telling you to sit the turn
+            # out. That single bug defeated the entire honesty gate.
+            raw = {s: float(v) * float(pred.kelly_scale)
+                   for s, v in bot_bet["stakes"].items()}
             played, w = self.validate_bet(raw)
+            if pred.tier == "pass":
+                w = ["the bot says PASS this turn, so following it means no stake",
+                     *w]
+            elif pred.tier == "provisional":
+                w = [f"bot is hedging: staked {int(100 * pred.kelly_scale)}% of its "
+                     f"normal size", *w]
         elif follow == "blend":
             mix = {s: 0.5 * (my.get(s, 0) + float(bot_bet["stakes"].get(s, 0)))
                    for s in self.symbols}
@@ -493,7 +506,8 @@ class GameEngine:
                                         round(self.capital * 0.1 / 10) * 10 or 10)}})
         return out
 
-    def state(self, include: Sequence[str] = ("lab", "patterns", "backtest")) -> Dict[str, Any]:
+    def state(self, include: Sequence[str] = ("lab", "patterns", "backtest",
+                                              "trend")) -> Dict[str, Any]:
         pend = self.session.get("pending")
         plan = self.plan()
         turns = self.session.get("turns", [])
@@ -536,6 +550,10 @@ class GameEngine:
         }
         if "lab" in include:
             payload["shape_lab"] = self.shape_lab()
+        if "trend" in include:
+            min_run = int(self.settings.g("brain", "trend_min_run", default=3))
+            payload["trend"] = simulate.trend_report(res, self.symbols,
+                                                     min_run=min_run)
         if "patterns" in include:
             payload["patterns"] = self.brain.pattern_report(order=2, min_n=6)[:14]
             payload["patterns3"] = self.brain.pattern_report(order=3, min_n=8)[:10]

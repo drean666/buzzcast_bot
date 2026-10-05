@@ -19,7 +19,10 @@ Sources
     custom         probabilities you supply
 
 Policies
-    bot            follow the brain, but only when the honesty gate commits
+    bot            follow the brain exactly as the button does: full size when
+                   it commits, a hedged fraction when it is provisional, and
+                   nothing when it passes
+    bot_strict     full-size commitments only, ignore the hedges
     bot_loose      follow the brain whenever any colour has positive EV
     split_two      YOUR strategy: fixed stake on a fixed pair of colours
     always_top     fixed stake on the brain's top colour, gate ignored
@@ -176,14 +179,50 @@ def make_policy(name: str, settings: Settings, opts: Dict[str, Any]) -> Callable
         return {s: 0 for s in symbols}
 
     def policy(pred, capital: float, ctx: Dict[str, Any]) -> Dict[str, float]:
-        if name == "bot":
-            if not pred.committed:
+        if name in ("bot", "bot_strict"):
+            # ``bot`` mirrors the "follow the bot" button exactly: the tier's
+            # kelly_scale is the gate made concrete (1.0 / a fraction / 0.0),
+            # so the lab and live play cannot drift apart.
+            # ``bot_strict`` takes only the full-size commitments.
+            scale = float(pred.kelly_scale)
+            if name == "bot_strict":
+                if not pred.committed:
+                    return zero()
+                scale = 1.0
+            if scale <= 0:
                 return zero()
-            return clamp(betting.kelly_stakes(pred.probs, payouts, symbols,
-                                              capital, bet_cfg)["stakes"], capital)
+            k = betting.kelly_stakes(pred.probs, payouts, symbols, capital, bet_cfg)
+            st = {s: float(v) * scale for s, v in k["stakes"].items()}
+            return clamp(st, capital)
         if name == "bot_loose":
             k = betting.kelly_stakes(pred.probs, payouts, symbols, capital, bet_cfg)
             return clamp(k["stakes"], capital) if k.get("total") else zero()
+        if name in ("trend2", "trend2_weighted"):
+            # THE TREND STRATEGY, exactly as played by hand:
+            # watch the last few results; if they span exactly TWO colours you
+            # are inside a run, so stake on both of those colours; the moment
+            # the third colour appears the window spans three and you are out.
+            # ``trend2`` splits equally; ``trend2_weighted`` leans toward
+            # whichever of the two has been showing more often.
+            k = int(opts.get("trend_min_run", 3))
+            hist = list(ctx.get("history") or [])
+            if len(hist) < k:
+                return zero()
+            w = hist[-k:]
+            cov_pair = sorted(set(w))
+            if len(cov_pair) != 2:
+                return zero()
+            if name == "trend2_weighted":
+                cnt = {x: sum(1 for y in hist[-max(k, 6):] if y == x) for x in cov_pair}
+                tot = sum(cnt.values()) or 1
+                st = zero()
+                for x in cov_pair:
+                    st[x] = flat * 2 * cnt[x] / tot
+                return clamp(st, capital)
+            st = zero()
+            for x in cov_pair:
+                st[x] = flat
+            return clamp(st, capital)
         if name == "split_two":
             st = zero()
             st[pair[0]] = flat
@@ -258,7 +297,7 @@ def run(source_kind: str, policy_name: str, turns: int, settings: Settings,
             break
         pred = brain.predict(fast=True)
         stakes = policy(pred, capital, {"turn": i, "prev_pnl": prev_pnl,
-                                        "capital": capital, "history": results[-8:]})
+                                        "capital": capital, "history": results})
         total = sum(stakes.values())
         sym = src.next()
         results.append(sym)
@@ -391,6 +430,119 @@ def _pct(xs: Sequence[float], q: float) -> float:
         return 0.0
     i = min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))
     return xs[i]
+
+
+# ----------------------------------------------------------------------- trends
+def current_trend(seq: Sequence[str], min_run: int = 3) -> Dict[str, Any]:
+    """Describe the run we are standing in right now.
+
+    "Run" = the longest suffix of results that spans no more than two colours.
+    That is the thing your eye picks out: red and green for a while, blue
+    nowhere to be seen.
+    """
+    seq = list(seq)
+    if not seq:
+        return {"active": False, "run": 0, "covered": [], "pair": [],
+                "message": "no results yet"}
+    covered = {seq[-1]}
+    run = 1
+    for i in range(len(seq) - 2, -1, -1):
+        if len(covered | {seq[i]}) <= 2:
+            covered |= {seq[i]}
+            run += 1
+        else:
+            break
+    window = seq[-min_run:] if len(seq) >= min_run else seq
+    pair = sorted(set(window)) if len(set(window)) == 2 else []
+    if len(seq) < min_run:
+        msg = f"need {min_run} results to read a trend (have {len(seq)})"
+    elif pair:
+        msg = (f"inside a {run}-turn run of {'/'.join(x.upper() for x in sorted(covered))}"
+               f" — staking both pays +50% if either lands")
+    elif len(covered) == 1:
+        msg = f"{run} in a row on {seq[-1].upper()} — a one-colour streak"
+    else:
+        msg = "no two-colour run right now"
+    return {"active": bool(pair), "run": run, "covered": sorted(covered),
+            "pair": pair, "message": msg}
+
+
+def trend_report(seq: Sequence[str], symbols: Sequence[str], min_run: int = 3,
+                 max_run: int = 12) -> Dict[str, Any]:
+    """Does a two-colour run actually continue more often than chance?
+
+    The bet you described: equal stakes on the two colours that have been
+    running. It returns +50% if either lands and -100% if the third colour
+    breaks the run, so at 3x flat odds it needs the pair to hold **66.67%** of
+    the time just to break even.
+
+    Here is the catch, and it is exact rather than approximate: **in a game
+    with no memory, the answer is 66.67% no matter how long the run is.**
+    Independence means the previous twelve results tell you nothing about the
+    next one, so conditioning on "we are in a long run" cannot move the
+    probability. Long runs are genuinely common — over 1,000 fair turns you
+    expect several runs of a dozen — they simply do not predict anything.
+
+    Rows are grouped by how long the run already is when you sit down, which
+    is the one question that matters: does a longer run mean a better bet?
+    """
+    seq = list(seq)
+    by_len: Dict[int, Dict[str, int]] = {}
+    for i in range(min_run, len(seq)):
+        covered = {seq[i - 1]}
+        length = 1
+        for j in range(i - 2, -1, -1):
+            if len(covered | {seq[j]}) <= 2:
+                covered |= {seq[j]}
+                length += 1
+            else:
+                break
+        if len(covered) != 2 or length < min_run:
+            continue
+        bucket = by_len.setdefault(min(length, max_run), {"n": 0, "continued": 0})
+        bucket["n"] += 1
+        if seq[i] in covered:
+            bucket["continued"] += 1
+
+    be = 100.0 * 2.0 / len(symbols) if len(symbols) == 3 else 100.0 * 2 / 3
+    rows = []
+    for length in sorted(by_len):
+        b = by_len[length]
+        n, c = b["n"], b["continued"]
+        rate = 100.0 * c / n
+        p = stats.binom_test_greater(c, n, 2.0 / 3.0)
+        rows.append({"run": length, "n": n, "continued": c,
+                     "continued_pct": round(rate, 1),
+                     "break_even_pct": round(be, 2),
+                     "edge_pct": round(rate - be, 1),
+                     "p_value": round(p, 4), "significant": p <= 0.05})
+    tot_n = sum(b["n"] for b in by_len.values())
+    tot_c = sum(b["continued"] for b in by_len.values())
+    overall = {"n": tot_n, "continued": tot_c,
+               "continued_pct": round(100.0 * tot_c / tot_n, 1) if tot_n else 0.0,
+               "break_even_pct": round(be, 2),
+               "edge_pct": round(100.0 * tot_c / tot_n - be, 1) if tot_n else 0.0,
+               "p_value": round(stats.binom_test_greater(tot_c, tot_n, 2.0 / 3.0), 4)
+               if tot_n else 1.0}
+    return {"min_run": min_run, "rows": rows, "overall": overall,
+            "current": current_trend(seq, min_run),
+            "verdict": _trend_verdict(overall)}
+
+
+def _trend_verdict(overall: Dict[str, Any]) -> str:
+    n, rate, p = overall["n"], overall["continued_pct"], overall["p_value"]
+    if n < 25:
+        return (f"only {n} trend turns measured — not enough to tell a real edge "
+                f"from a lucky run")
+    if p <= 0.05 and rate > 66.67:
+        return (f"runs are continuing {rate:.1f}% of the time vs the 66.7% needed "
+                f"(p={p:.4f}) — this game DOES have memory, and the trend bet is real")
+    if p <= 0.05 and rate < 66.67:
+        return (f"runs continue only {rate:.1f}% of the time vs 66.7% needed "
+                f"(p={p:.4f}) — runs are breaking more often than chance")
+    return (f"runs continue {rate:.1f}% of the time against the 66.7% break-even "
+            f"(p={p:.2f}) — consistent with a game that has no memory, so the "
+            f"trend carries no information")
 
 
 def ledger_bets(turns: Sequence[Dict[str, Any]], symbols: Sequence[str]) -> List[Dict[str, float]]:

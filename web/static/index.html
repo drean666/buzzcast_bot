@@ -97,6 +97,7 @@
   <div>
     <div class="tabs" id="tabs">
       <button class="tab on" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="trends">Trends</button>
       <button class="tab" data-tab="shapes">Bet types</button>
       <button class="tab" data-tab="patterns">Patterns</button>
       <button class="tab" data-tab="backtest">Backtest</button>
@@ -125,6 +126,34 @@
       <div class="panel">
         <h3>Recent results</h3>
         <div class="row" id="results-tail"></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-trends">
+      <div class="panel">
+        <h3>Are the trends real?</h3>
+        <div class="callout info" style="margin-bottom:12px">
+          Your strategy: while two colours are running, stake both; stop when the third
+          appears. At 3× flat odds that pays <b>+50%</b> if either lands and <b>−100%</b>
+          if the third breaks it, so the pair must hold <b>66.7%</b> of the time to break even.
+          <br><br>
+          The test below measures exactly that on your own results — and, crucially, whether a
+          <i>longer</i> run means a better bet. In a game with no memory the answer is pinned at
+          66.7% no matter how long the run, so a trend can feel obvious and still carry nothing.
+        </div>
+        <div id="trend-current"></div>
+        <div class="sep"></div>
+        <div id="trend-table"></div>
+        <div id="trend-verdict" style="margin-top:12px"></div>
+      </div>
+      <div class="panel">
+        <h3>What stake size does to this strategy</h3>
+        <div class="small mut" style="margin-bottom:10px">
+          60 independent 600-turn runs, starting from 1,000 coins. The trend bet was played
+          with 150 on each of the two colours; the bot sizes its own stakes. Mode:
+          <code>python3 -c "..."</code> — see README for the one-liner.
+        </div>
+        <div class="scroll"><table id="trend-risk-table"></table></div>
       </div>
     </div>
 

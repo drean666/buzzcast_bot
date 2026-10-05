@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import archive_old_history                                      # noqa: E402
 from engine import betting, simulate, stats, storage            # noqa: E402
 from engine.brain import Brain                                  # noqa: E402
 from engine.game import GameEngine                              # noqa: E402
@@ -502,15 +503,194 @@ def test_trust_needs_data_before_deciding():
     assert snap["risk"]["turns"] == 0
 
 
+
+@test
+def test_follow_bot_respects_the_gate():
+    """Following the bot must never stake MORE than the bot proposed.
+
+    This is the bug that a 31-test suite missed: the gate was correct, but the
+    "follow the bot" path applied the tier's stake multiplier only in the
+    provisional case, so on a `pass` tier it quietly placed a full Kelly stake
+    while the bot was telling you to sit the turn out. Tests that gate on
+    ``pred.committed`` before calling place_bet cannot see it, because they
+    never exercise the click a user actually makes.
+    """
+    e, s = fresh()
+    # an empty brain has no edge, so every tier must be pass and cost nothing
+    for _ in range(6):
+        pr = e.plan()
+        assert pr["tier"] == "pass", pr["tier"]
+        assert pr["kelly_scale"] == 0.0
+        p = e.place_bet(None, follow="bot")
+        assert p["stake_total"] == 0.0, \
+            f"follow-the-bot staked {p['stake_total']} on a pass tier"
+        e.resolve("r")
+    approx(e.capital, 1000.0)
+    assert len(e.session["turns"]) == 6, "the turns must still be recorded"
+    # on a genuinely profitable source the same click must stake something
+    e2, _ = fresh()
+    src = simulate.make_source("biased", e2.symbols, seed=41)
+    for _ in range(120):
+        e2.plan()
+        e2.place_bet(None, follow="bot")
+        e2.resolve(src.next())
+    assert any(t["stake_total"] > 0 for t in e2.session["turns"]), \
+        "follow-the-bot never staked on a source with a real edge"
+
+
+@test
+def test_follow_bot_never_exceeds_its_own_proposal():
+    """Whatever the tier, the followed stake is the proposal times its scale."""
+    e, s = fresh()
+    src = simulate.make_source("markov", e.symbols, seed=44)
+    for _ in range(150):
+        pr = e.plan()
+        proposed = float((pr["bet"] or {}).get("total") or 0)
+        p = e.place_bet(None, follow="bot")
+        expected = proposed * float(pr["kelly_scale"])
+        # allow rounding to the stake step and the min-stake floor
+        assert p["stake_total"] <= expected + 10 + 1e-9, \
+            (p["stake_total"], expected, pr["tier"])
+        if pr["tier"] == "pass":
+            assert p["stake_total"] == 0.0
+        e.resolve(src.next())
+
+
+@test
+def test_no_stake_without_corrected_evidence():
+    """The old 70 results must not buy a live position.
+
+    A 3.4% one-sided lean on 70 samples fails the Bonferroni bar, and the
+    model's own probabilities are worse than uniform on that data - two weak
+    signals pointing opposite ways. Marginal evidence must buy nothing.
+    """
+    s = Settings.load()
+    b = Brain(s).fit(archive_old_history.load())
+    pr = b.predict()
+    assert pr.tier == "pass", (pr.tier, pr.roi_pct, pr.p_edge)
+    assert pr.kelly_scale == 0.0
+    assert b.ig_all() < 0.0, "this dataset should measure a negative edge"
+
+
+# ----------------------------------------------------------------------- trends
+@test
+def test_trend_report_finds_no_memory_in_a_fair_game():
+    """A two-colour run must NOT predict anything when the game has no memory.
+
+    This is the mathematically exact claim the whole Trends tab rests on: for
+    an i.i.d. game, P(next is in the pair | the last k were in the pair) is
+    exactly 2/3 for EVERY k. Long runs are common - you expect ~23 twelve-turn
+    runs per 1,000 turns - but they carry no information, so the observed
+    continuation rate must sit at the 66.7% break-even no matter how long the
+    run is.
+    """
+    s = Settings.load()
+    rng = random.Random(1)
+    seq = [rng.choice(["r", "b", "g"]) for _ in range(10000)]
+    rep = simulate.trend_report(seq, s.symbols, min_run=3, max_run=10)
+    o = rep["overall"]
+    assert o["n"] > 1000, o["n"]
+    assert abs(o["continued_pct"] - 66.67) < 2.5, o["continued_pct"]
+    assert not (o["p_value"] <= 0.05 and o["continued_pct"] > 66.67), \
+        "claimed a trend edge on a game with no memory"
+    # and run length must not change the answer
+    for row in rep["rows"]:
+        assert abs(row["continued_pct"] - 66.67) < 7.0, row
+
+
+@test
+def test_trend_report_finds_memory_when_it_exists():
+    s = Settings.load()
+    seq = markov_stream(6000, M_STRONG, seed=9)
+    rep = simulate.trend_report(seq, s.symbols, min_run=3, max_run=10)
+    o = rep["overall"]
+    assert o["continued_pct"] > 70.0, o["continued_pct"]
+    assert o["p_value"] <= 0.01, o["p_value"]
+    assert "memory" in rep["verdict"]
+
+
+@test
+def test_current_trend_reads_the_run_correctly():
+    s = Settings.load()
+    # a clean two-colour run
+    cur = simulate.current_trend(["g", "r", "g", "r", "g", "r"], 3)
+    assert cur["active"] and cur["pair"] == ["g", "r"], cur
+    assert cur["run"] == 6
+    # a third colour inside the window kills the read
+    cur = simulate.current_trend(["g", "r", "g", "r", "b"], 3)
+    assert not cur["active"], cur
+    # a one-colour streak is reported but is not a pair
+    cur = simulate.current_trend(["r", "r", "r", "r"], 3)
+    assert not cur["active"] and cur["covered"] == ["r"]
+    # and no crash on nothing
+    assert simulate.current_trend([], 3)["active"] is False
+
+
+@test
+def test_trend_stake_size_is_what_burns_you():
+    """On a fair game the trend bet must be destructive, and the bot must not be.
+
+    The strategy is break-even in expectation, so the loss cannot come from a
+    bad edge - it comes from putting 300 on a 1,000 bankroll and losing all of
+    it a third of the time. Median outcome is near zero while the mean stays
+    up around break-even, which is the signature of a high-variance bet that
+    most players will not survive.
+    """
+    s = Settings.load()
+    trend, bot = [], []
+    for sd in range(12):
+        trend.append(simulate.run("fair", "trend2", 400, s, start_capital=1000,
+                                  seed=sd, opts={"stake": 150, "trend_min_run": 3}))
+        bot.append(simulate.run("fair", "bot", 400, s, start_capital=1000,
+                                seed=sd, opts={"stake": 150}))
+    trend_final = sorted(r["final_capital"] for r in trend)
+    bot_final = sorted(r["final_capital"] for r in bot)
+    assert sum(1 for r in trend if r["ruined"]) >= 3, \
+        "the trend bet survived a fair game too often to be realistic"
+    assert trend_final[0] < 500, trend_final[0]
+    assert bot_final[0] > 900, "the bot must not lose money on a fair game"
+    assert sum(1 for r in bot if r["ruined"]) == 0
+
+
+@test
+def test_trend_policy_wins_where_memory_is_real():
+    """The same strategy must make money when the game genuinely streaks."""
+    s = Settings.load()
+    runs = [simulate.run("markov_strong", "trend2", 600, s, start_capital=1000,
+                         seed=sd, opts={"stake": 150, "trend_min_run": 3})
+            for sd in range(6)]
+    fin = sorted(r["final_capital"] for r in runs)
+    assert fin[len(fin) // 2] > 2000, fin
+
+
 # -------------------------------------------------------------- simulations
 @test
 def test_sim_fair_game_loses_nothing_for_the_bot():
+    """On noise the bot must not COMMIT, and must not lose money either way.
+
+    Two distinct claims, tested separately: the strict policy places no bets
+    at all, while the follow-the-button policy takes its small provisional
+    hedges - which on a fair game must still average out near break-even with
+    bounded damage rather than compounding.
+    """
     s = Settings.load()
-    r = simulate.run("fair", "bot", 1500, s, start_capital=1000, seed=17,
-                     opts={"stake": 120})
-    assert r["bets"] == 0, f"bot bet {r['bets']} times on a fair game"
-    approx(r["final_capital"], 1000.0, 1e-6)
-    assert not r["ruined"]
+    strict = simulate.run("fair", "bot_strict", 1500, s, start_capital=1000,
+                          seed=17, opts={"stake": 120})
+    assert strict["bets"] == 0, f"bot_strict bet {strict['bets']} times on noise"
+    approx(strict["final_capital"], 1000.0, 1e-6)
+    assert not strict["ruined"]
+
+    finals = []
+    for seed in (4, 5, 6, 7, 8, 9):
+        r = simulate.run("fair", "bot", 1500, s, start_capital=1000, seed=seed,
+                         opts={"stake": 120})
+        assert r["committed_turns"] == 0, \
+            f"seed {seed}: committed {r['committed_turns']} times on a fair game"
+        assert r["max_drawdown_pct"] < 35.0, \
+            f"seed {seed}: {r['max_drawdown_pct']:.1f}% drawdown on noise"
+        finals.append(r["final_capital"])
+    avg = sum(finals) / len(finals)
+    assert 800 < avg < 1250, f"fair-game hedges drifted to {avg:.0f}: {finals}"
 
 
 @test

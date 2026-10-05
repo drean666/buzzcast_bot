@@ -114,7 +114,9 @@ in which it is quietly confident.
 
 That gate is what `test_brain_rejects_fair_game` protects: across 4,500 turns
 of genuinely random results it must commit **zero** times, and on the weaker
-Markov source it must hedge rather than bet hard.
+Markov source it must hedge rather than bet hard. `test_no_stake_without_
+corrected_evidence` pins the specific dataset that motivated the rule — the
+old 70 results — and asserts it cannot buy a live position.
 
 **4. It keeps score on you.** A meta-learner tracks your hit rate against the
 bot's with confidence intervals, and answers "who should I be following?" with
@@ -139,13 +141,16 @@ betting math against synthetic results with known ground truth:
 | `replay` | your own recorded results, looped | learn from what you have |
 | `custom` | probabilities you type in | — |
 
-Strategies include the bot, a fixed split, always-on-the-favourite, covering
-all three, Martingale, random, and `mirror_you` — which replays your own
-recorded stake vectors so you can ask "what if I had kept playing like that?"
+Strategies include `bot` (the follow-the-button policy, hedges included),
+`bot_strict` (full-size commitments only), a fixed split, always-on-the-
+favourite, covering all three, Martingale, random, and `mirror_you` — which
+replays your own recorded stake vectors so you can ask "what if I had kept
+playing like that?"
 
 Run the whole grid and read the **ruin rate** column first. On `fair`, every
 strategy that keeps betting eventually dies, and Martingale dies fastest.
-That is the entire lesson of the game in one table.
+That is the entire lesson of the game in one table. The bot is the only line
+that survives it — by declining to play.
 
 You can also **fast-forward the live ledger**: same engine, same learning,
 results auto-generated, so your actual bankroll and the bot's own record move.
@@ -177,9 +182,19 @@ almost immediately and compounds hard.
   uses only results 0…*i*−1, including the info-gain figure and the paper
   trade. The backtest replays those recorded decisions rather than
   recalculating them with hindsight.
-- **Multiple comparisons are corrected.** The gate runs every turn and watches
-  every colour, so it uses α/k. Without that, a fair game would manufacture a
-  "pattern" every twenty turns.
+- **Multiple comparisons are corrected, and correction is the price of entry.**
+  The gate runs every turn and watches every colour, so it uses α/k — and no
+  stake of any size is offered on evidence that fails that corrected bar.
+  Without it, a fair game manufactures a "pattern" every twenty turns and the
+  hedges on those false positives produce 74–82% drawdowns.
+- **A negative paper trade is disqualifying, not merely unsignificant.** If
+  backing your own favourite has lost money, your favourite is not a bet,
+  whatever a frequency test says.
+- **Two independent ways to be right.** Requiring both a base-rate edge *and*
+  a sharp probability distribution would block real bets — a model can be
+  badly calibrated and still have a profitable favourite. So either line of
+  evidence can license a hedge on its own; the strict commit bar still needs
+  the full package.
 - **Zero-variance samples are handled.** A record with no variance and a
   positive mean is the strongest evidence there is; a naive t-test reports it
   as p = 0.50. `_p_from` special-cases it.
