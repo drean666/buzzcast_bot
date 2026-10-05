@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>buzzcast — capital simulator</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">buzz<span>cast</span></div>
+  <div class="cap">
+    <b id="capital">—</b>
+    <span id="capital-sub" class="small mut"></span>
+  </div>
+  <span id="phase" class="pill live">loading</span>
+  <div class="row" style="margin-left:auto">
+    <select id="session-select" style="width:auto" title="session"></select>
+    <button id="btn-new-session" class="ghost small">+ session</button>
+    <button id="btn-refresh" class="ghost small">refresh</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ LEFT: the turn ============ -->
+  <div>
+    <div class="panel">
+      <div class="row between">
+        <h3 style="margin:0">The bot's read</h3>
+        <span id="tier" class="badge pass">—</span>
+      </div>
+      <div id="probs" style="margin:10px 0"></div>
+      <div class="row small mut" id="pred-meta"></div>
+      <ul class="reasons" id="reasons"></ul>
+      <div class="sep"></div>
+      <div id="bot-bet" class="small"></div>
+    </div>
+
+    <!-- bet entry -->
+    <div class="panel" id="panel-bet">
+      <h3>Your bet</h3>
+      <div id="stakes"></div>
+      <div class="sep"></div>
+      <div class="small mut" style="margin-bottom:6px">Presets</div>
+      <div class="row" id="presets"></div>
+      <div class="sep"></div>
+      <div class="row small">
+        <span class="mut">Follow:</span>
+        <button data-follow="mine" class="on">Mine</button>
+        <button data-follow="bot">The bot's</button>
+        <button data-follow="blend">50/50 blend</button>
+      </div>
+      <div id="bet-preview" class="small" style="margin:10px 0"></div>
+      <div class="row">
+        <button id="btn-bet" class="primary" style="flex:1">Lock in the bet</button>
+        <button id="btn-pass">Pass</button>
+      </div>
+    </div>
+
+    <!-- result entry -->
+    <div class="panel hidden" id="panel-result">
+      <h3>What actually happened?</h3>
+      <div id="pending-summary" class="small mut" style="margin-bottom:10px"></div>
+      <div class="row" style="margin-bottom:10px">
+        <button class="result-btn r" data-result="r">R</button>
+        <button class="result-btn b" data-result="b">B</button>
+        <button class="result-btn g" data-result="g">G</button>
+      </div>
+      <div class="row">
+        <button id="btn-cancel-bet" class="ghost small">cancel this bet (no stake lost)</button>
+      </div>
+    </div>
+
+    <div id="bust-warning" class="panel hidden">
+      <div class="callout">Bankroll is below the minimum stake — the simulator is over unless you deposit.
+        <div style="margin-top:8px"><button id="btn-rebuy" class="primary small">Deposit 500</button></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Bankroll</h3>
+      <svg id="curve-cap" class="spark"></svg>
+      <div class="legend"><span><i style="background:var(--acc)"></i>capital</span>
+        <span><i style="background:var(--dim)"></i>start</span></div>
+      <div class="sep"></div>
+      <div class="kv small" id="risk-kv"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Who should you trust?</h3>
+      <div id="trust"></div>
+    </div>
+  </div>
+
+  <!-- ============ RIGHT: the detail ============ -->
+  <div>
+    <div class="tabs" id="tabs">
+      <button class="tab on" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="shapes">Bet types</button>
+      <button class="tab" data-tab="patterns">Patterns</button>
+      <button class="tab" data-tab="backtest">Backtest</button>
+      <button class="tab" data-tab="lab">Simulation lab</button>
+      <button class="tab" data-tab="history">History</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </div>
+
+    <div class="tab-panel" id="tab-overview">
+      <div class="grid4" id="overview-stats"></div>
+      <div class="panel">
+        <h3>Learning curves</h3>
+        <svg id="curve-acc" class="spark" style="height:110px"></svg>
+        <div class="legend"><span><i style="background:var(--acc)"></i>walk-forward hit rate %
+          (dashed = chance)</span></div>
+        <svg id="curve-ig" class="spark" style="height:110px;margin-top:10px"></svg>
+        <div class="legend"><span><i style="background:var(--ok)"></i>out-of-sample edge over uniform
+          (bits/symbol) — above 0 means real information</span></div>
+      </div>
+      <div class="panel">
+        <h3>How the model is weighing itself</h3>
+        <div id="weights"></div>
+        <div class="sep"></div>
+        <div class="small mut" id="latest-info"></div>
+      </div>
+      <div class="panel">
+        <h3>Recent results</h3>
+        <div class="row" id="results-tail"></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-shapes">
+      <div class="panel">
+        <h3>What each bet type does at these odds</h3>
+        <div class="callout info" style="margin-bottom:12px">
+          All three colours pay <b>3×</b>, so the implied probabilities sum to exactly 1.000 —
+          there is <b>no house edge and no arbitrage</b>. Profit comes only from predicting
+          better than 33.3% per colour. A split bet has to <i>cover</i> a colour often enough
+          to pay for the leg that misses.
+        </div>
+        <div class="scroll"><table id="lab-table"></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-patterns">
+      <div class="panel">
+        <h3>Contexts worth noticing</h3>
+        <div class="small mut" style="margin-bottom:10px">
+          After context X, what followed? "p" is a one-sided test against each colour's own
+          base rate. Anything not marked significant is noise — and with enough patterns
+          scanned, some will look good by luck alone.
+        </div>
+        <div class="scroll"><table id="patterns-table"></table></div>
+      </div>
+      <div class="panel">
+        <h3>Three-step contexts</h3>
+        <div class="scroll"><table id="patterns3-table"></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-backtest">
+      <div class="panel">
+        <h3>Replay: you vs the bot, on your own results</h3>
+        <div class="small mut" style="margin-bottom:10px">
+          The bot's decisions here are walk-forward: it can only use results that had already
+          happened. Same as live play.
+        </div>
+        <div class="grid2" id="backtest-cards"></div>
+        <svg id="curve-bt" class="spark" style="height:130px;margin-top:12px"></svg>
+        <div class="legend"><span><i style="background:var(--ok)"></i>bot</span>
+          <span><i style="background:var(--acc)"></i>you</span></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-lab">
+      <div class="panel">
+        <h3>Run the bot against a known ground truth</h3>
+        <div class="small mut" style="margin-bottom:10px">
+          Synthetic results with known structure. This is the only place you can tell
+          <i>skill</i> apart from <i>luck</i>: on a fair source the bot must refuse to bet,
+          and on a biased one it must make money. If it bets on <code>fair</code>, the
+          honesty gate is broken.
+        </div>
+        <div class="grid4">
+          <label class="small mut">Result source<select id="sim-source"></select></label>
+          <label class="small mut">Strategy<select id="sim-policy"></select></label>
+          <label class="small mut">Turns<input id="sim-turns" type="number" value="600" min="20" max="20000"></label>
+          <label class="small mut">Seed<input id="sim-seed" type="number" value="1"></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="btn-sim" class="primary">Run</button>
+          <button id="btn-grid">Run the whole grid</button>
+          <span id="sim-status" class="small mut"></span>
+        </div>
+        <div id="sim-result" style="margin-top:14px"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Simulate straight into the live ledger</h3>
+        <div class="small mut" style="margin-bottom:10px">
+          Fast-forwards <i>this</i> session: same engine, same learning, results auto-generated.
+          Your capital and the bot both move for real.
+        </div>
+        <div class="grid3">
+          <label class="small mut">Source<select id="auto-source"></select></label>
+          <label class="small mut">Turns<input id="auto-turns" type="number" value="60" min="1" max="2000"></label>
+          <label class="small mut">Whose bets<select id="auto-follow">
+            <option value="bot">the bot's</option><option value="mine">my split preset</option>
+          </select></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button id="btn-auto" class="primary">Fast-forward</button>
+          <span class="small mut">Creates turns you can undo in bulk.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-history">
+      <div class="panel">
+        <h3>Turns</h3>
+        <div class="row" style="margin-bottom:10px">
+          <button id="btn-undo">Undo last turn</button>
+          <button id="btn-undo5">Undo 5</button>
+          <a href="/api/export?what=turns" download><button>Export CSV</button></a>
+          <a href="/api/export?what=results" download><button>Export results</button></a>
+        </div>
+        <div class="scroll"><table id="history-table"></table></div>
+      </div>
+    </div>
+
+    <div class="tab-panel hidden" id="tab-settings">
+      <div class="panel">
+        <h3>Sessions</h3>
+        <div class="row" style="margin-bottom:10px">
+          <button id="btn-seed-archive">Seed model from the old 70 results</button>
+          <button id="btn-clear-warm">Clear that seed</button>
+        </div>
+        <div class="scroll"><table id="sessions-table"></table></div>
+      </div>
+      <div class="panel">
+        <h3>Rules &amp; risk (edit, then Save)</h3>
+        <div id="config-editor"></div>
+        <div class="row" style="margin-top:12px">
+          <button id="btn-save-config" class="primary">Save &amp; reload</button>
+          <span id="cfg-status" class="small mut"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

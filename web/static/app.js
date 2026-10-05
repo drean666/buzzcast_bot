@@ -1,0 +1,578 @@
+/* buzzcast UI — vanilla JS, no dependencies, no external requests. */
+'use strict';
+
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const S = { state: null, config: null, ui: {
+  stakes: { r: 0, b: 0, g: 0 }, follow: 'mine', tab: 'overview',
+  sim: { source: 'fair', policy: 'bot', turns: 600, seed: 1 },
+  auto: { source: 'biased', turns: 60, follow: 'bot' },
+  busy: false,
+} };
+
+const COLORS = { r: '#ef4444', b: '#3b82f6', g: '#22c55e' };
+const money = (v) => (v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v)).toLocaleString();
+const pct = (v, d = 1) => (v >= 0 ? '+' : '') + v.toFixed(d) + '%';
+const cls = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : 'mut');
+
+function toast(msg, isErr) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isErr ? ' err' : '');
+  el.innerHTML = esc(msg);
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), isErr ? 6000 : 3200);
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} :
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  let data;
+  try { data = txt ? JSON.parse(txt) : {}; } catch (e) { data = { ok: false, error: txt.slice(0, 300) }; }
+  if (!r.ok || data.ok === false) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+/* ---------------------------------------------------------------- charts */
+function svgLine(series, opts) {
+  const o = Object.assign({ w: 600, h: 160, fill: true, color: '#7c8aff',
+                            dash: [], zero: null, pad: 6 }, opts || {});
+  const all = series.filter(s => s.v.length);
+  if (!all.length) return '<text x="10" y="20" fill="#6e7681" font-size="12">no data yet</text>';
+  let lo = Infinity, hi = -Infinity;
+  all.forEach(s => s.v.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); }));
+  if (o.zero !== null) { lo = Math.min(lo, o.zero); hi = Math.max(hi, o.zero); }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const span = hi - lo;
+  const X = (i, n) => (n <= 1 ? 0 : (i / (n - 1)) * o.w);
+  const Y = (v) => o.h - o.pad - ((v - lo) / span) * (o.h - 2 * o.pad);
+  let out = '';
+  all.forEach(s => {
+    const d = s.v.map((v, i) => (i ? 'L' : 'M') + X(i, s.v.length).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ');
+    if (o.fill && s.fill !== false) {
+      out += `<path d="${d} L ${o.w} ${o.h} L 0 ${o.h} Z" fill="${s.color}" opacity="0.10"/>`;
+    }
+    out += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.6" `
+         + `vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+  });
+  if (o.zero !== null && o.zero >= lo && o.zero <= hi) {
+    out += `<line x1="0" y1="${Y(o.zero).toFixed(1)}" x2="${o.w}" y2="${Y(o.zero).toFixed(1)}" `
+         + `stroke="#6e7681" stroke-width="1" stroke-dasharray="4 4" vector-effect="non-scaling-stroke"/>`;
+  }
+  return out;
+}
+function spark(el, series, opts) {
+  const node = typeof el === 'string' ? $(el) : el;
+  if (!node) return;
+  const o = Object.assign({ w: 600, h: 160 }, opts || {});
+  node.setAttribute('viewBox', `0 0 ${o.w} ${o.h}`);
+  node.setAttribute('preserveAspectRatio', 'none');
+  node.innerHTML = svgLine(series, o);
+}
+
+/* ------------------------------------------------------------- rendering */
+function colourOf(sym) { return (S.state && S.state.colors && S.state.colors[sym]) || COLORS[sym] || '#888'; }
+function nameOf(sym) { return (S.state && S.state.names && S.state.names[sym]) || String(sym).toUpperCase(); }
+
+function render() {
+  const st = S.state;
+  if (!st) return;
+  const c = st.capital, pr = st.prediction;
+
+  /* header */
+  $('#capital').textContent = money(c.value);
+  $('#capital').className = cls(c.net);
+  $('#capital-sub').innerHTML = `start ${money(c.start)} · net <span class="${cls(c.net)}">${money(c.net)}</span>`
+    + (c.deposits ? ` · deposits ${money(c.deposits)}` : '')
+    + ` · ${c.turns} turns`;
+  const ph = $('#phase');
+  ph.textContent = st.phase === 'await_result' ? 'result pending' : 'place your bet';
+  ph.className = 'pill' + (st.phase === 'await_result' ? '' : ' live');
+
+  /* session selector */
+  const sel = $('#session-select');
+  sel.innerHTML = st.session.all.map(s =>
+    `<option value="${esc(s.name)}"${s.active ? ' selected' : ''}>${esc(s.name)} · ${s.turns}t · ${money(s.capital)}</option>`).join('');
+
+  /* prediction */
+  $('#tier').textContent = pr.tier;
+  $('#tier').className = 'badge ' + pr.tier;
+  $('#probs').innerHTML = st.symbols.map(s => {
+    const p = pr.probs[s];
+    return `<div class="pbar${s === pr.top ? ' top' : ''}">
+      <span class="lab" style="color:${colourOf(s)}">${esc(nameOf(s))}</span>
+      <span class="track"><span class="fill" style="width:${(p * 100).toFixed(1)}%;background:${colourOf(s)}"></span></span>
+      <span class="num">${(p * 100).toFixed(1)}%</span></div>`;
+  }).join('');
+  $('#pred-meta').innerHTML =
+    `<span>${pr.n_obs} results learned</span><span>·</span>`
+  + `<span>confidence <b>${pr.confidence.toFixed(1)}%</b> (gate ${pr.gate ? pr.gate.confidence.toFixed(0) : '—'}→38)</span><span>·</span>`
+  + `<span>break-even ${pr.break_even_pct.toFixed(1)}%</span><span>·</span>`
+  + `<span class="${cls(pr.roi_pct)}">paper trade ${pct(pr.roi_pct)} / unit, p=${pr.roi_p_value.toFixed(3)}</span>`
+  + `<span>·</span><span class="${cls(pr.info_gain_bits)}">edge ${pr.info_gain_bits >= 0 ? '+' : ''}${pr.info_gain_bits.toFixed(4)} bits</span>`;
+
+  $('#reasons').innerHTML =
+    pr.reasons.map(r => `<li class="good">${esc(r)}</li>`).join('') +
+    pr.blockers.map(b => `<li class="bad">${esc(b)}</li>`).join('');
+
+  /* bot's proposed bet */
+  const bb = pr.bet || {};
+  const botParts = Object.keys(bb.stakes || {}).filter(k => bb.stakes[k] > 0)
+    .map(k => `<b style="color:${colourOf(k)}">${Math.round(bb.stakes[k])} ${esc(nameOf(k))}</b>`).join(' + ');
+  $('#bot-bet').innerHTML = bb.total
+    ? `<div class="row between"><span>${bb.shape === 'split2' ? 'split' : 'single'}: ${botParts}</span>
+        <span class="num">${money(bb.total)}</span></div>
+       <div class="row between small"><span class="mut">expected value</span>
+        <span class="num ${cls(bb.ev)}">${money(bb.ev)} (${pct(bb.ev_pct)})</span></div>
+       <div class="row between small"><span class="mut">exposure of bankroll</span>
+        <span class="num">${bb.exposure_pct.toFixed(1)}%</span></div>
+       <div class="row between small"><span class="mut">Kelly fraction used</span>
+        <span class="num">${(bb.kelly_fraction * 100).toFixed(1)}%</span></div>
+       <div class="row" style="margin-top:8px"><button class="small" id="btn-copy-bot">copy this into my bet</button></div>`
+    : `<span class="mut">${esc(bb.reason || 'no bet proposed')}</span>`;
+
+  /* bet panel vs result panel */
+  const pending = st.pending;
+  $('#panel-bet').classList.toggle('hidden', !!pending);
+  $('#panel-result').classList.toggle('hidden', !pending);
+  $('#bust-warning').classList.toggle('hidden', !c.busted);
+  if (pending) {
+    const p = pending;
+    $('#pending-summary').innerHTML =
+      `locked in <b>${esc(p.shape)}</b> — ${Object.keys(p.played_bet).filter(k => p.played_bet[k] > 0)
+        .map(k => `<b style="color:${colourOf(k)}">${Math.round(p.played_bet[k])} ${esc(nameOf(k))}</b>`).join(' + ') || 'nothing (pass)'}
+       &nbsp;·&nbsp; at risk <b>${money(p.stake_total)}</b> of ${money(p.capital_before)}
+       &nbsp;·&nbsp; following: ${esc(p.followed)}`;
+  } else {
+    renderStakes();
+    renderPresets();
+    renderPreview();
+  }
+
+  /* bankroll — meta.curve is a flat list of capital values, one per turn */
+  const curve = (st.meta.curve || []).filter(v => typeof v === 'number');
+  const capCurve = curve.length > 1 ? curve : [c.start, c.value];
+  spark('#curve-cap', [{ v: capCurve, color: '#7c8aff' }], { zero: c.start, fill: true });
+  const rk = st.meta.risk;
+  $('#risk-kv').innerHTML = [
+    ['peak', money(rk.peak)], ['max drawdown', money(rk.max_drawdown) + ' (' + rk.max_drawdown_pct.toFixed(1) + '%)'],
+    ['return on start', pct(rk.return_on_start_pct)], ['turnover (stake ROI)', pct(rk.roi_pct)],
+  ].map(([k, v]) => `<div>${k}</div><div class="num">${v}</div>`).join('');
+
+  /* trust */
+  const t = st.meta.trust, st2 = st.meta.streaks;
+  $('#trust').innerHTML =
+    `<div class="row between"><b>${esc(t.verdict)}</b>
+       <span class="small mut">p(bot better) = ${t.p_bot_better.toFixed(3)}</span></div>
+     <div class="small mut" style="margin:6px 0">${esc(t.why)}</div>
+     <div class="grid2" style="margin:10px 0">
+       <div class="stat"><div class="k">your hit rate</div><div class="v">${t.me_hit_rate_pct.toFixed(1)}%</div>
+         <div class="tiny dim">${t.me_turns} picks · 95% CI ${t.me_ci[0].toFixed(0)}–${t.me_ci[1].toFixed(0)}%</div></div>
+       <div class="stat"><div class="k">bot hit rate</div><div class="v">${t.bot_hit_rate_pct.toFixed(1)}%</div>
+         <div class="tiny dim">${t.bot_turns} turns · 95% CI ${t.bot_ci[0].toFixed(0)}–${t.bot_ci[1].toFixed(0)}%</div></div>
+     </div>
+     <div class="kv small">
+       <div>trust weight</div><div class="num">${(t.trust_weight * 100).toFixed(1)}%</div>
+       <div>${esc(t.recommendation)}</div><div></div>
+     </div>
+     <div class="sep"></div>
+     <div class="kv small">
+       <div>if you had followed the bot</div><div class="num ${cls(st.meta.follow.bot.pnl)}">${money(st.meta.follow.bot.pnl)} on ${money(st.meta.follow.bot.stake)}</div>
+       <div>if you had followed yourself</div><div class="num ${cls(st.meta.follow.mine.pnl)}">${money(st.meta.follow.mine.pnl)} on ${money(st.meta.follow.mine.stake)}</div>
+       <div>current streak</div><div class="num">${st2.current} (best ${st2.best}, worst ${st2.worst})</div>
+       <div>cost of tilt</div><div class="num ${cls(-st.meta.tilt.cost_of_tilt)}">${money(-st.meta.tilt.cost_of_tilt)}</div>
+     </div>`;
+
+  /* ---- overview */
+  const b = st.brain;
+  $('#overview-stats').innerHTML = [
+    ['results learned', b.n_obs],
+    ['walk-forward hit rate', b.oos_hit_rate_pct.toFixed(1) + '%'],
+    ['chance', b.chance_pct.toFixed(1) + '%'],
+    ['contexts tracked', b.contexts_learned],
+    ['log loss', b.log_loss_bits.toFixed(3) + ' bits'],
+    ['paper trade', pct(b.paper_roi_pct)],
+    ['committed turns', b.committed_steps + ' / ' + b.n_obs],
+    ['hedged turns', (b.provisional_steps || 0) + ' / ' + b.n_obs],
+  ].map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${esc(String(v))}</div></div>`).join('');
+
+  spark('#curve-acc', [{ v: st.curves.accuracy || [], color: '#7c8aff' }], { zero: 33.333 });
+  spark('#curve-ig', [{ v: st.curves.info_gain || [], color: '#22c55e' }], { zero: 0 });
+
+  $('#weights').innerHTML = Object.keys(b.order_weights).sort((x, y) => x - y).map(k => {
+    const w = b.order_weights[k], label = k === '0' ? 'base rate' : k + '-step context';
+    return `<div class="pbar"><span class="lab small">${label}</span>
+      <span class="track"><span class="fill" style="width:${(w * 100).toFixed(1)}%;background:#7c8aff"></span></span>
+      <span class="num small">${(w * 100).toFixed(0)}%</span></div>`;
+  }).join('');
+  $('#latest-info').innerHTML =
+    `This is the hedge learning live: weights shift toward whichever context depth is
+     predicting best out-of-sample. Base rate ${b.chance_pct.toFixed(1)}% is the floor —
+     anything below the dashed line is worse than guessing.`;
+  $('#results-tail').innerHTML = st.results_tail.map(s => {
+    const edge = (s === st.prediction.top) ? ' outline' : '';
+    return `<span class="chip ${esc(s)}">${esc(nameOf(s)[0])}</span>`;
+  }).join('');
+
+  /* ---- shape lab */
+  if (st.shape_lab) {
+    $('#lab-table').innerHTML =
+      `<thead><tr><th>bet</th><th>stake</th><th>EV</th><th>EV %</th>
+        <th>chance covered</th><th>if covered</th><th>if not</th>
+        <th>needs cover</th><th>streak to bust</th></tr></thead><tbody>`
+      + st.shape_lab.map(r => `<tr${r.label.startsWith('BOT') ? ' style="background:rgba(124,138,255,.07)"' : ''}>
+        <td>${esc(r.label)}</td><td class="num">${r.total ? money(r.total) : '—'}</td>
+        <td class="num ${cls(r.ev)}">${r.ev ? money(r.ev) : '—'}</td>
+        <td class="num ${cls(r.ev_pct)}">${r.ev_pct ? pct(r.ev_pct) : '—'}</td>
+        <td class="num">${r.win_rate_pct ? r.win_rate_pct.toFixed(1) + '%' : '—'}</td>
+        <td class="num pos">${r.best_net ? money(r.best_net) : '—'}</td>
+        <td class="num neg">${r.worst_net ? money(r.worst_net) : '—'}</td>
+        <td class="num${r.cover_break_even_pct > r.win_rate_pct ? ' neg' : ''}">${r.cover_break_even_pct != null ? r.cover_break_even_pct.toFixed(1) + '%' : '—'}</td>
+        <td class="num tiny dim">${r.consecutive_losses_to_bust != null ? r.consecutive_losses_to_bust + ' losses' : '—'}</td>
+      </tr>`).join('') + '</tbody>';
+  }
+  if (st.patterns) { $('#patterns-table').innerHTML = patternTable(st.patterns); }
+  if (st.patterns3) { $('#patterns3-table').innerHTML = patternTable(st.patterns3); }
+
+  /* ---- backtest */
+  if (st.backtest) {
+    const bt = st.backtest;
+    $('#backtest-cards').innerHTML = [['The bot', bt.bot], ['You', bt.you]].map(([ttl, d]) => `
+      <div><div class="stat" style="margin-bottom:8px">
+        <div class="k">${ttl} — final capital</div>
+        <div class="v ${cls(d.final_capital - bt.bot.curve[0])}">${money(d.final_capital)}</div>
+        <div class="tiny dim">${d.bets} bets · hit ${d.win_rate_pct.toFixed(1)}% · max DD ${d.max_drawdown_pct.toFixed(1)}%</div>
+      </div>
+      <div class="kv small">
+        <div>profit</div><div class="num ${cls(d.pnl)}">${money(d.pnl)}</div>
+        <div>staked</div><div class="num">${d.staked ? money(d.staked) : '—'}</div>
+        <div>return on stake</div><div class="num ${cls(d.roi_pct)}">${pct(d.roi_pct)}</div>
+      </div></div>`).join('');
+    if (bt.bot.curve && bt.bot.curve.length) {
+      spark('#curve-bt', [
+        { v: bt.bot.curve, color: '#22c55e' },
+        { v: bt.you.curve, color: '#7c8aff' }], { zero: null });
+    }
+  }
+
+  /* ---- history */
+  $('#history-table').innerHTML =
+    `<thead><tr><th>#</th><th>time</th><th>bot pick</th><th>your bet</th><th>played</th>
+      <th>stake</th><th>result</th><th>P/L</th><th>capital</th><th>hit</th><th></th></tr></thead><tbody>`
+    + st.recent_turns.map(t => `<tr>
+        <td class="num">${t.n}${t.edited ? ' <span class="tiny mid" title="edited">✎</span>' : ''}</td>
+        <td class="tiny dim">${esc((t.time || '').replace('T', ' ').slice(5, 16))}</td>
+        <td><span class="chip ${esc(t.bot_top || '')}">${esc((nameOf(t.bot_top) || '—')[0])}</span>
+            <span class="tiny dim">${t.bot_conf != null ? t.bot_conf.toFixed(0) + '%' : ''}${t.bot_committed ? ' ●' : ''}</span></td>
+        <td>${betText(t.my_pick ? { [t.my_pick]: 1 } : null, t.played_bet, true)}</td>
+        <td>${betText(null, t.played_bet)}</td>
+        <td class="num">${t.stake ? Math.round(t.stake) : '—'}</td>
+        <td><span class="chip ${esc(t.result || '')}">${esc(nameOf(t.result))}</span></td>
+        <td class="num ${cls(t.pnl)}">${money(t.pnl)}</td>
+        <td class="num dim">${money(t.capital_after)}</td>
+        <td class="num">${t.hit ? '✓' : t.stake ? '✕' : '·'}</td>
+        <td><button class="ghost tiny" data-fix="${t.n}" title="correct the result">fix</button></td>
+      </tr>`).join('') + '</tbody>';
+
+  /* ---- settings */
+  $('#sessions-table').innerHTML =
+    `<thead><tr><th>session</th><th>turns</th><th>capital</th><th>results</th><th></th></tr></thead><tbody>`
+    + st.session.all.map(s => `<tr>
+        <td>${esc(s.name)}${s.active ? ' <span class="tiny mut">(active)</span>' : ''}</td>
+        <td class="num">${s.turns}</td><td class="num">${money(s.capital)}</td>
+        <td class="num">${s.results}</td>
+        <td>${s.active ? '' : `<button class="ghost tiny" data-switch="${esc(s.name)}">switch</button>`}
+            ${s.active ? `<button class="ghost tiny" data-del="${esc(s.name)}">delete</button>` : ''}</td>
+      </tr>`).join('') + '</tbody>';
+  renderConfig();
+}
+
+function betText(_x, played, compact) {
+  if (!played) return '<span class="dim">—</span>';
+  const parts = Object.keys(played).filter(k => played[k] > 0)
+    .map(k => `<b style="color:${colourOf(k)}">${Math.round(played[k])}</b>`);
+  if (!parts.length) return '<span class="dim">pass</span>';
+  return compact ? parts.join('/') : parts.join(' + ');
+}
+
+function patternTable(rows) {
+  if (!rows.length) return '<tbody><tr><td class="mut">not enough repeated contexts yet</td></tr></tbody>';
+  return `<thead><tr><th>context</th><th>n</th><th>followed by</th><th>share</th>
+    <th>base rate</th><th>lift</th><th>p</th><th></th></tr></thead><tbody>`
+    + rows.map(r => `<tr>
+      <td><b class="num">${esc(r.label)}</b></td>
+      <td class="num">${r.n}</td>
+      <td><span class="chip ${esc(r.top)}">${esc(nameOf(r.top))}</span></td>
+      <td class="num">${(r.share * 100).toFixed(1)}%</td>
+      <td class="num dim">${(r.base * 100).toFixed(1)}%</td>
+      <td class="num ${r.lift > 1 ? 'pos' : 'neg'}">${r.lift.toFixed(2)}×</td>
+      <td class="num">${r.p_value.toFixed(4)}</td>
+      <td>${r.significant ? '<span class="tiny pos">significant</span>' : '<span class="tiny dim">noise</span>'}</td>
+    </tr>`).join('') + '</tbody>';
+}
+
+/* ------------------------------------------------------------ bet inputs */
+function renderStakes() {
+  const st = S.state;
+  $('#stakes').innerHTML = st.symbols.map(s => `
+    <div class="stake">
+      <span class="chip ${s}">${esc(nameOf(s))}</span>
+      <input type="number" min="0" step="${st.capital.stake_step}" data-stake="${s}"
+             value="${Math.round(S.ui.stakes[s] || 0)}">
+      <span class="tiny dim">×${st.payouts[s]} →${Math.round((S.ui.stakes[s] || 0) * st.payouts[s])}</span>
+    </div>`).join('');
+  $$('[data-stake]').forEach(inp => inp.oninput = () => {
+    S.ui.stakes[inp.dataset.stake] = Math.max(0, Number(inp.value) || 0);
+    renderPreview();
+  });
+  $$('[data-follow]').forEach(btn => {
+    btn.classList.toggle('on', btn.dataset.follow === S.ui.follow);
+    btn.onclick = () => { S.ui.follow = btn.dataset.follow; renderStakes();
+      const id = S.ui.follow === 'bot' ? 'btn-bet' : null;
+      $('#btn-bet').textContent = S.ui.follow === 'bot' ? "Follow the bot"
+        : S.ui.follow === 'blend' ? "Lock in the 50/50 blend" : "Lock in the bet"; };
+  });
+  $('#btn-bet').textContent = S.ui.follow === 'bot' ? "Follow the bot"
+    : S.ui.follow === 'blend' ? "Lock in the 50/50 blend" : "Lock in the bet";
+}
+
+function renderPresets() {
+  const st = S.state;
+  $('#presets').innerHTML = (st.presets || []).map((p, i) =>
+    `<button class="small" data-preset="${i}">${esc(p.label)}</button>`).join('');
+  $$('[data-preset]').forEach(b => b.onclick = () => {
+    const p = st.presets[Number(b.dataset.preset)];
+    st.symbols.forEach(s => S.ui.stakes[s] = p.stakes[s] || 0);
+    renderStakes(); renderPreview();
+  });
+}
+
+function renderPreview() {
+  const st = S.state, pr = st.prediction, P = st.payouts;
+  const stk = S.ui.stakes;
+  const total = st.symbols.reduce((a, s) => a + (stk[s] || 0), 0);
+  if (!total) { $('#bet-preview').innerHTML = '<span class="mut">nothing staked — this would be a pass (the result is still recorded and learned from).</span>'; return; }
+  let ev = 0, best = -Infinity, worst = Infinity, covers = 0, covered = [];
+  st.symbols.forEach(s => {
+    const ret = P[s] * (stk[s] || 0), net = ret - total;
+    ev += pr.probs[s] * net;
+    best = Math.max(best, net); worst = Math.min(worst, net);
+    if (net > 0) { covers++; covered.push(s); }
+  });
+  const cap = st.capital.value, exp = 100 * total / Math.max(cap, 1);
+  const be = total ? (total / (P[st.symbols[0]])) : 0;
+  const winProb = covered.reduce((a, s) => a + pr.probs[s], 0);
+  $('#bet-preview').innerHTML = `
+    <div class="kv small">
+      <div>total at risk</div><div class="num">${money(total)} <span class="${exp > 20 ? 'mid' : 'dim'}">(${exp.toFixed(1)}% of bankroll)</span></div>
+      <div>expected value</div><div class="num ${cls(ev)}">${money(ev)} <span class="dim">(${pct(100 * ev / total)})</span></div>
+      <div>you win if</div><div class="num">${covered.length ? covered.map(s => esc(nameOf(s))).join(' or ') + ' <span class="dim">(' + (100 * winProb).toFixed(1) + '% likely)</span>' : '<span class="neg">nothing covers</span>'}</div>
+      <div>best case</div><div class="num pos">${money(best)}</div>
+      <div>worst case</div><div class="num neg">${money(worst)}</div>
+    </div>
+    ${exp > 20 ? '<div class="callout" style="margin-top:8px">Above the ' + '20% exposure guideline the bot uses.</div>' : ''}`;
+}
+
+/* -------------------------------------------------------------- actions */
+async function act(fn, okMsg) {
+  if (S.ui.busy) return;
+  S.ui.busy = true;
+  try { await fn(); if (okMsg) toast(okMsg); }
+  catch (e) { toast(e.message, true); }
+  finally { S.ui.busy = false; }
+}
+
+async function refresh(include) {
+  const q = include ? '?include=' + include.join(',') : '';
+  const st = await api('/api/state' + q);
+  S.state = st;
+  render();
+}
+
+function wire() {
+  $$('#tabs .tab').forEach(t => t.onclick = () => {
+    $$('#tabs .tab').forEach(x => x.classList.toggle('on', x === t));
+    $$('.tab-panel').forEach(p => p.classList.add('hidden'));
+    $('#tab-' + t.dataset.tab).classList.remove('hidden');
+    S.ui.tab = t.dataset.tab;
+  });
+
+  $('#btn-refresh').onclick = () => act(refresh);
+  $('#btn-bet').onclick = () => act(async () => {
+    const d = await api('/api/bet', { stakes: S.ui.stakes, follow: S.ui.follow });
+    S.state = d.state; S.state.pending = d.pending;
+    const full = await api('/api/state'); S.state = full; render();
+  }, 'bet locked in — enter the real result when it lands');
+  $('#btn-pass').onclick = () => act(async () => {
+    await api('/api/pass', {}); await refresh();
+  }, 'turn passed — the result still teaches the model');
+
+  $$('[data-result]').forEach(b => b.onclick = () => act(async () => {
+    await api('/api/resolve', { result: b.dataset.result });
+    await refresh();
+    const t = S.state.recent_turns[0];
+    if (t) toast(`settled ${nameOf(t.result)} — ${money(t.pnl)}`);
+  }));
+
+  $('#btn-cancel-bet').onclick = () => act(async () => {
+    await api('/api/cancel', {}); await refresh();
+  }, 'bet cancelled — nothing was staked');
+
+  $('#btn-copy-bot').onclick = () => {
+    const bb = S.state.prediction.bet;
+    Object.keys(bb.stakes).forEach(s => S.ui.stakes[s] = bb.stakes[s]);
+    renderStakes(); renderPreview(); toast('copied the bot\'s stakes');
+  };
+
+  $$('[data-fix]').forEach(b => b.onclick = () => {
+    const n = Number(b.dataset.fix);
+    const v = prompt('Correct result for turn ' + n + ' (r/b/g):');
+    if (!v || !'rbg'.includes(v.toLowerCase()[0])) return;
+    act(async () => { await api('/api/edit', { turn: n, result: v.toLowerCase()[0] }); await refresh(); },
+      'turn corrected and everything re-derived');
+  });
+  $$('[data-switch]').forEach(b => b.onclick = () => act(async () => {
+    await api('/api/session', { action: 'switch', name: b.dataset.switch }); await refresh();
+  }));
+  $$('[data-del]').forEach(b => b.onclick = () => {
+    if (!confirm('Delete session ' + b.dataset.del + '?')) return;
+    act(async () => { await api('/api/session', { action: 'delete', name: b.dataset.del }); await refresh(); });
+  });
+
+  $('#btn-undo').onclick = () => act(async () => { await api('/api/undo', { n: 1 }); await refresh(); }, 'last turn removed');
+  $('#btn-undo5').onclick = () => act(async () => { await api('/api/undo', { n: 5 }); await refresh(); }, 'last 5 turns removed');
+  $('#btn-rebuy').onclick = () => act(async () => { await api('/api/deposit', { amount: 500 }); await refresh(); }, 'deposited 500');
+  $('#btn-new-session').onclick = () => {
+    const name = prompt('New session name:', 'session-' + (S.state.session.all.length + 1));
+    if (!name) return;
+    act(async () => { await api('/api/session', { action: 'new', name }); await refresh(); }, 'session created');
+  };
+  $('#session-select').onchange = (e) => act(async () => {
+    await api('/api/session', { action: 'switch', name: e.target.value }); await refresh();
+  });
+  $('#btn-seed-archive').onclick = () => act(async () => {
+    const d = await api('/api/session', { action: 'seed_archive' });
+    await refresh(); toast('seeded ' + d.seeded + ' archived results');
+  });
+  $('#btn-clear-warm').onclick = () => act(async () => {
+    const d = await api('/api/session', { action: 'new', name: 'clean-' + Date.now().toString().slice(-4) });
+    await refresh(); toast('new clean session created');
+  });
+
+  $('#btn-sim').onclick = () => act(async () => {
+    S.ui.sim = { source: $('#sim-source').value, policy: $('#sim-policy').value,
+                 turns: Number($('#sim-turns').value), seed: Number($('#sim-seed').value) };
+    $('#sim-status').innerHTML = '<span class="spin"></span> running…';
+    const d = await api('/api/sim', S.ui.sim);
+    renderSim(d.result);
+    $('#sim-status').textContent = '';
+  });
+  $('#btn-grid').onclick = () => act(async () => {
+    $('#sim-status').innerHTML = '<span class="spin"></span> running the whole grid (a few seconds)…';
+    const d = await api('/api/grid', { turns: Number($('#sim-turns').value) });
+    renderGrid(d.result);
+    $('#sim-status').textContent = '';
+  });
+  $('#btn-auto').onclick = () => act(async () => {
+    const body = { source: $('#auto-source').value, turns: Number($('#auto-turns').value),
+                   follow: $('#auto-follow').value,
+                   stakes: $('#auto-follow').value === 'mine' ? S.ui.stakes : undefined };
+    const d = await api('/api/autoplay', body);
+    S.state = d.state; render();
+    toast('fast-forwarded ' + d.played + ' turns into this session');
+  });
+
+  $('#btn-save-config').onclick = () => act(async () => {
+    const patch = {};
+    $$('[data-cfg]').forEach(inp => {
+      const path = inp.dataset.cfg.split('.');
+      let node = patch;
+      path.slice(0, -1).forEach(k => node = (node[k] = node[k] || {}));
+      node[path[path.length - 1]] = Number(inp.value);
+    });
+    await api('/api/config', { patch });
+    await refresh();
+    toast('settings saved — model rebuilt');
+  });
+}
+
+function renderSim(r) {
+  const ok = r.ruined ? 'neg' : r.roi_pct > 0 ? 'pos' : 'mut';
+  $('#sim-result').innerHTML = `
+    <div class="grid4">
+      ${[['final capital', money(r.final_capital), ok],
+         ['return', pct(r.roi_pct), cls(r.roi_pct)],
+         ['bets placed', r.bets + ' / ' + r.turns_played, ''],
+         ['win rate', r.win_rate_pct.toFixed(1) + '%', ''],
+         ['max drawdown', r.max_drawdown_pct.toFixed(1) + '%', 'neg'],
+         ['busted', r.ruined ? 'yes' + (r.ruined_at_turn != null ? ' @ ' + r.ruined_at_turn : '') : 'no', r.ruined ? 'neg' : 'pos'],
+         ['engine hit rate', r.engine_hit_rate_pct.toFixed(1) + '%', ''],
+         ['engine edge', r.engine_edge_bits.toFixed(4) + ' bits', r.engine_edge_bits > 0 ? 'pos' : 'mut'],
+        ].map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${esc(String(v))}</div></div>`).join('')}
+    </div>
+    <svg class="spark" id="curve-sim" style="height:150px;margin-top:12px"></svg>
+    <div class="legend"><span><i style="background:var(--acc)"></i>bankroll over ${r.turns_played} turns
+      (${esc(r.source)} / ${esc(r.policy)} / seed ${r.seed})</span></div>`;
+  spark('#curve-sim', [{ v: r.curve || [], color: '#7c8aff' }],
+    { zero: 1000, fill: true });
+}
+
+function renderGrid(out) {
+  const stores = [...new Set(out.summary.map(r => r.source))];
+  let html = '';
+  stores.forEach(src => {
+    const rows = out.summary.filter(r => r.source === src);
+    html += `<div class="small" style="margin-top:14px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut)">${esc(src)}</div>`;
+    html += `<table><thead><tr><th>strategy</th><th>median final</th><th>mean ROI</th>
+      <th>worst</th><th>best</th><th>ruin rate</th><th>max DD</th><th>turnover</th></tr></thead><tbody>`
+      + rows.map(r => `<tr${r.policy === 'bot' ? ' style="background:rgba(124,138,255,.09)"' : ''}>
+        <td>${esc(r.policy)}</td>
+        <td class="num">${money(r.median_final)}</td>
+        <td class="num ${cls(r.mean_roi_pct)}">${pct(r.mean_roi_pct)}</td>
+        <td class="num neg">${pct(r.worst_roi_pct)}</td>
+        <td class="num pos">${pct(r.best_roi_pct)}</td>
+        <td class="num ${r.ruin_rate_pct > 0 ? 'neg' : 'pos'}">${r.ruin_rate_pct.toFixed(0)}%</td>
+        <td class="num">${r.mean_dd_pct.toFixed(1)}%</td>
+        <td class="num dim">${r.mean_bets.toFixed(0)} bets</td>
+      </tr>`).join('') + '</tbody></table>';
+  });
+  html += `<div class="callout info" style="margin-top:14px">
+    Read the <b>ruin rate</b> column first. On <code>fair</code> — a game with no edge at all —
+    every strategy that keeps betting loses money in the long run, and the bot's refusal to bet
+    is the win. On <code>markov</code> the bot may still pass: the pattern is real, but a
+    3× payout demands a lot of edge. On <code>markov_strong</code> it must make money, or
+    something is broken.</div>`;
+  $('#sim-result').innerHTML = html;
+}
+
+function renderConfig() {
+  if (S.config && $('#config-editor').children.length) return;
+  api('/api/config').then(d => {
+    S.config = d.config;
+    const groups = [['capital', ['starting', 'stake_step', 'min_stake', 'max_stake_per_turn',
+                                 'max_exposure_fraction', 'default_split_stake']],
+                    ['honesty', ['confidence_threshold_percent', 'min_info_gain_bits',
+                                 'max_p_value', 'recent_window', 'provisional_kelly_scale']],
+                    ['bot_bet', ['kelly_fraction', 'min_edge_to_bet']],
+                    ['brain', ['max_context_order', 'recency_decay', 'min_data_before_analysis']],
+                    ['trust', ['decay', 'decide_margin', 'tilt_multiplier']]];
+    $('#config-editor').innerHTML = groups.map(([g, keys]) => {
+      const spec = d.config[g];
+      if (!spec) return '';
+      return `<div class="small mut" style="margin:10px 0 4px;text-transform:uppercase;letter-spacing:.06em">${g}</div>
+      <div class="grid3">${keys.filter(k => k in spec).map(k => `
+        <label class="small mut">${k.replace(/_/g, ' ')}
+        <input type="number" step="any" data-cfg="${g}.${k}" value="${spec[k]}"></label>`).join('')}</div>`;
+    }).join('');
+  });
+}
+
+/* ---------------------------------------------------------------- boot */
+refresh().then(wire).catch(e => {
+  document.body.insertAdjacentHTML('afterbegin',
+    `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
+});
