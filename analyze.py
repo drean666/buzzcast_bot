@@ -18,6 +18,7 @@ number is reported as meaningful before it is.
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 import os
@@ -59,14 +60,45 @@ def turns_needed(p: float, p0: float = 2.0 / 3.0, power: float = 0.8,
     return int(math.ceil(num / ((p - p0) ** 2)))
 
 
+
+# ---------------------------------------------------------------- encoding
+# Windows is the only place this matters, and it is the user's platform, so it
+# is handled explicitly rather than assumed. Two ways a file arrives non-UTF-8:
+#   * Excel re-saves a CSV in the local code page (cp1252 on a French or
+#     English Windows), silently dropping the UTF-8 we wrote;
+#   * Excel and Notepad add a UTF-8 BOM, which json.load rejects outright.
+# Reading with a hardcoded utf-8 turns both into a bare "charmap codec" crash
+# with no hint about what to do. Try the likely encodings, then say something
+# useful.
+ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+def read_text(path: str) -> str:
+    """Read a text file whatever a Windows editor did to it."""
+    raw = open(path, "rb").read()
+    for enc in ENCODINGS:
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def load_json(path: str):
+    import json as _json
+    return _json.loads(read_text(path))
+
+
 # ------------------------------------------------------------------- loading
 def load_any(path: str) -> Dict[str, Any]:
     """Accept a live data.json, a results CSV, or an exported turns CSV."""
     if not os.path.exists(path):
         raise SystemExit(f"cannot find {path}")
     if path.lower().endswith(".json"):
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        try:
+            data = load_json(path)
+        except ValueError as exc:
+            raise SystemExit(f"{path} is not readable as JSON ({exc}). If you edited it by "
+                             f"hand, re-save it as UTF-8.")
         # the archived v1 file has a different shape; pull results out of both
         sessions = data.get("sessions") or {}
         if not sessions and (data.get("entries") or data.get("results")):
@@ -105,8 +137,7 @@ def load_any(path: str) -> Dict[str, Any]:
         return {"kind": "session", "name": name, "results": results, "turns": turns,
                 "raw": data}
 
-    with open(path, "r", encoding="utf-8", newline="") as fh:
-        rows = list(csv.DictReader(fh))
+    rows = list(csv.DictReader(io.StringIO(read_text(path), newline="")))
     if not rows:
         raise SystemExit("that file has no rows")
     cols = set(rows[0].keys())
@@ -306,6 +337,8 @@ def report(path: str, settings: Optional[Settings] = None) -> str:
 
 
 def main() -> None:
+    from engine import safe_console
+    safe_console()
     path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "data.json")
     if not os.path.exists(path):
         raise SystemExit(

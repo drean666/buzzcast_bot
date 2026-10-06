@@ -1,11 +1,25 @@
 {
   "schema": 2,
-  "symbols": ["r", "b", "g"],
-  "symbol_names": { "r": "RED", "b": "BLUE", "g": "GREEN" },
-  "symbol_colors": { "r": "#e8402a", "b": "#2f6fed", "g": "#1faa59" },
-
-  "payouts": { "r": 3.0, "b": 3.0, "g": 3.0 },
-
+  "symbols": [
+    "r",
+    "b",
+    "g"
+  ],
+  "symbol_names": {
+    "r": "RED",
+    "b": "BLUE",
+    "g": "GREEN"
+  },
+  "symbol_colors": {
+    "r": "#e8402a",
+    "b": "#2f6fed",
+    "g": "#1faa59"
+  },
+  "payouts": {
+    "r": 3.0,
+    "b": 3.0,
+    "g": 3.0
+  },
   "capital": {
     "starting": 1000,
     "stake_step": 10,
@@ -15,7 +29,6 @@
     "bust_fraction": 0.02,
     "default_split_stake": 120
   },
-
   "brain": {
     "max_context_order": 5,
     "interpolation_alpha": 2.0,
@@ -24,7 +37,6 @@
     "weight_decay": 0.995,
     "min_data_before_analysis": 15
   },
-
   "honesty": {
     "confidence_threshold_percent": 38.0,
     "min_info_gain_bits": 0.01,
@@ -32,13 +44,11 @@
     "recent_window": 40,
     "provisional_kelly_scale": 0.3
   },
-
   "bot_bet": {
     "kelly_fraction": 0.25,
     "min_edge_to_bet": 0.01,
     "allow_multi_colour": true
   },
-
   "trust": {
     "decay": 0.99,
     "decide_margin": 0.75,
@@ -46,14 +56,33 @@
     "tilt_exposure_fraction": 0.25,
     "ucb_c": 1.2
   },
-
   "sim": {
     "default_turns": 200,
-    "sources": ["fair", "biased_green", "markov", "replay"],
-    "policies": ["bot", "always_split_two", "always_top", "flat_stake", "martingale", "random"]
+    "sources": [
+      "fair",
+      "biased_green",
+      "markov",
+      "replay"
+    ],
+    "policies": [
+      "bot",
+      "always_split_two",
+      "always_top",
+      "flat_stake",
+      "martingale",
+      "random"
+    ]
   },
-
-  "ui": { "host": "0.0.0.0", "port": 8077 },
-
-  "_comment": "Flat 3.0x payouts on 3 symbols = a perfectly fair book (implied probability sums to 1.00): no house edge, no arbitrage. Every coin of profit must come from prediction skill. confidence_threshold_percent is set to 38 because break-even accuracy at 3x odds is 33.4% - anything above that is already +EV, so the real gate is the p-value plus info-gain test in engine/brain.py."
+  "ui": {
+    "host": "0.0.0.0",
+    "port": 8077
+  },
+  "_comment": "Flat 3.0x payouts on 3 symbols = a perfectly fair book (implied probability sums to 1.00): no house edge, no arbitrage. Every coin of profit must come from prediction skill. confidence_threshold_percent is set to 38 because break-even accuracy at 3x odds is 33.4% - anything above that is already +EV, so the real gate is the p-value plus info-gain test in engine/brain.py.",
+  "_book": {
+    "implied_sum": 1.0,
+    "house_edge_pct": 0.0,
+    "arbitrage_possible": false,
+    "break_even_hit_rate_single_pct": 33.33
+  },
+  "_patched": "2026-10-06T11:08:38"
 }

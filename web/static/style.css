@@ -140,3 +140,86 @@ tbody tr:hover { background: rgba(124,138,255,.06); }
 .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--acc); border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; }
 @keyframes sp { to { transform: rotate(360deg); } }
 code { font-family: var(--mono); font-size: 12px; background: #0b0f16; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+
+/* ==================================================================
+   TABLE VIEW — the game screen.
+   One row of three giant colour tiles. What a tap does depends on the
+   phase: before the round it stakes that colour, after the round it
+   records the colour that came up.
+   ================================================================== */
+body.table-mode main { display: none; }
+#table-view { display: none; }
+body.table-mode #table-view { display: block; }
+
+.tv-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.tv-bot { font-size: 13px; }
+.tv-hint { margin-left: auto; font-size: 12px; color: var(--mut); }
+
+.tv-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+
+.tv-tile {
+  --c: #8a94a6; --cs: rgba(138,148,166,.10);
+  position: relative; min-height: 250px; padding: 24px 16px 18px;
+  border: 2px solid var(--line); border-radius: 20px;
+  background: linear-gradient(180deg, #161c26, #10151d);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; cursor: pointer; user-select: none; text-align: center;
+  transition: transform .07s ease, border-color .12s ease, box-shadow .18s ease;
+}
+.tv-tile:hover { transform: translateY(-3px); border-color: var(--c); }
+.tv-tile:active { transform: translateY(0); }
+.tv-tile.on {
+  border-color: var(--c);
+  background: linear-gradient(180deg, var(--cs), #10151d);
+  box-shadow: 0 0 0 1px var(--c) inset, 0 12px 40px -16px var(--c);
+}
+.tv-tile.armed { min-height: 272px; }
+.tv-tile.armed:hover { box-shadow: 0 0 0 2px var(--c) inset, 0 14px 44px -14px var(--c); }
+
+.tv-name { font-size: 19px; font-weight: 800; letter-spacing: .16em; color: var(--c); }
+.tv-stake { font-size: 54px; font-weight: 800; font-family: var(--mono); line-height: 1.05; }
+.tv-pay { font-size: 30px; font-weight: 800; font-family: var(--mono); line-height: 1.15; }
+.tv-sub { font-size: 12px; color: var(--mut); min-height: 17px; }
+.tv-chip { display: flex; gap: 8px; margin-top: 10px; }
+.tv-chip button { width: 46px; height: 38px; font-size: 19px; line-height: 1; border-radius: 11px; }
+.tv-tapme {
+  position: absolute; top: 12px; right: 12px; font-size: 10px; font-weight: 800;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--c); opacity: .55;
+}
+
+.tv-actions { display: flex; gap: 12px; margin-top: 16px; }
+.tv-actions button { flex: 1; padding: 19px; font-size: 17px; font-weight: 700; border-radius: 15px; }
+.tv-actions button.primary { font-size: 19px; }
+
+.tv-strip { display: flex; gap: 6px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
+.tv-dot {
+  width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center;
+  justify-content: center; font-size: 11px; font-weight: 800; color: #0b0f16;
+}
+
+.tv-setup {
+  border: 1px solid var(--acc); border-radius: 20px; padding: 24px;
+  background: linear-gradient(180deg, rgba(124,140,255,.08), #10151d); margin-bottom: 20px;
+}
+.tv-setup.hidden { display: none; }
+.tv-setup h3 { font-size: 15px; text-transform: none; letter-spacing: 0; color: #e8ecf4; margin-bottom: 6px; }
+.tv-setup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+.tv-field { display: flex; flex-direction: column; gap: 5px; }
+.tv-field input { font-size: 26px; font-family: var(--mono); padding: 12px 14px; }
+
+/* ---- the readiness ladder: where you are, and what to do right now ---- */
+.tv-stage {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px 16px; margin-bottom: 14px;
+  background: linear-gradient(90deg, rgba(124,140,255,.07), transparent 60%);
+}
+.tv-stage.done { background: linear-gradient(90deg, rgba(34,197,94,.10), transparent 60%); border-color: rgba(34,197,94,.35); }
+.tv-stage.mid  { background: linear-gradient(90deg, rgba(245,158,11,.10), transparent 60%); border-color: rgba(245,158,11,.35); }
+.tv-stage .step { font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--mut); white-space: nowrap; }
+.tv-stage .what { font-size: 14px; font-weight: 600; }
+.tv-stage .why  { font-size: 12px; color: var(--mut); }
+.tv-stage .paper { margin-left: auto; font-size: 12px; text-align: right; white-space: nowrap; }
+.tv-track { display: flex; gap: 3px; margin-top: 4px; }
+.tv-track i { width: 22px; height: 4px; border-radius: 2px; background: #232b38; display: block; }
+.tv-track i.on { background: var(--acc); }

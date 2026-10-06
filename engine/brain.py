@@ -41,20 +41,32 @@ def _t_stat(mean: float, var: float, n: int) -> float:
     return mean / math.sqrt(var / n)
 
 
-def _p_from(mean: float, var: float, n: int) -> float:
+def _p_from(mean: float, var: float, n: int, p_null_win: float = 1.0 / 3.0) -> float:
     """One-sided p-value for "the mean return is greater than zero".
 
-    The degenerate case matters: if every turn returned exactly the same
-    amount the sample variance is zero, and a naive t-test falls through to
-    p=0.5 — i.e. it reports "no evidence" for the most consistent possible
-    record. Zero variance with a positive mean is the strongest evidence
-    there is, so it gets p=0; zero variance with a flat or negative mean
-    supports nothing.
+    The zero-variance branch used to return 0.0 for any positive mean, on the
+    reasoning that a maximally consistent record is maximally strong evidence.
+    That is true asymptotically and false at small n, and the difference is not
+    academic: a 3x payout returns +2 for a win and -1 for a loss, so *two wins
+    in a row* is a zero-variance, positive-mean sample, and it scored p=0.0000.
+    Two wins is a 1-in-9 event. Because that p-value feeds a Bonferroni-
+    corrected gate, a fair game could reach "commit" on turn 17 and licence a
+    real stake with no edge behind it. Measured on fair games: 1 in 12 seeds
+    did exactly that.
+
+    A zero-variance sample can only mean every counted step had the same
+    outcome, so when the mean is positive every step *won*. The exact
+    probability of that under the null is p_null_win ** n, which is correct at
+    every sample size: 2 straight wins -> 0.111 (not evidence), 10 straight
+    wins -> 1.7e-05 (genuine evidence). The exponent does the work that the
+    degenerate t-test could not.
     """
     if n < 2:
         return 1.0
     if var <= 0:
-        return 0.0 if mean > 0 else 1.0
+        if mean <= 0:
+            return 1.0
+        return min(1.0, float(p_null_win) ** n)
     return stats.norm_sf(_t_stat(mean, var, n))
 
 
@@ -249,6 +261,9 @@ class Brain:
         # predicted colour at this game's odds, step by step. This is the
         # number the whole honesty gate is built on.
         self._roi_n = 0
+        self._roi_null_sum = 0.0
+        self._roi_null_ring: List[float] = []
+        self._roi_null_ring_sum = 0.0
         self._roi_sum = 0.0
         self._roi_sumsq = 0.0
         self._roi_ring: List[float] = []
@@ -347,10 +362,20 @@ class Brain:
             self._roi_n += 1
             self._roi_sum += roi
             self._roi_sumsq += roi * roi
+        # the null: how often the colour the model picked would have won on
+        # chance alone, i.e. its break-even rate at these odds. Zero-variance
+        # samples need it to price "n straight wins", so it is tracked with
+        # exactly the same window discipline as the returns themselves.
+        null_p = 1.0 / max(self.payouts.get(top, 1.0), EPS)
+        self._roi_null_sum += null_p
+        self._roi_null_ring.append(null_p)
         self._roi_ring.append(roi)
         self._roi_ring_sum += roi
         if self.window > 0 and len(self._roi_ring) > self.window:
             self._roi_ring_sum -= self._roi_ring.pop(0)
+            self._roi_null_ring_sum -= self._roi_null_ring.pop(0)
+        else:
+            self._roi_null_ring_sum = sum(self._roi_null_ring)
         self.oos_top.append(top)
         self.oos_actual.append(sym)
         hit = top == sym
@@ -445,15 +470,17 @@ class Brain:
         if n >= 2:
             mean = self._roi_sum / n
             var = max(self._roi_sumsq / n - mean * mean, 0.0) * n / (n - 1)
+            p0 = min(max(self._roi_null_sum / n, EPS), 1.0)
             out.update({"mean_pct": 100.0 * mean, "se_pct": 100.0 * math.sqrt(var / n)
                         if var > 0 else 0.0, "t": _t_stat(mean, var, n),
-                        "p_value": _p_from(mean, var, n)})
+                        "p_value": _p_from(mean, var, n, p0)})
         rn = len(self._roi_ring)
         if rn >= 2:
             rm = self._roi_ring_sum / rn
             rvar = max(sum((x - rm) ** 2 for x in self._roi_ring) / (rn - 1), 0.0)
+            rp0 = min(max(self._roi_null_ring_sum / rn, EPS), 1.0)
             out.update({"recent_mean_pct": 100.0 * rm,
-                        "recent_p_value": _p_from(rm, rvar, rn)})
+                        "recent_p_value": _p_from(rm, rvar, rn, rp0)})
         return out
 
     def _p_bias(self, fast: bool = False) -> Tuple[float, float]:
@@ -706,6 +733,7 @@ class Brain:
                 "info_gain": [round(ig[int(i * step)], 5) for i in range(buckets)]}
 
     def stats_snapshot(self) -> Dict[str, Any]:
+        _roi = self.roi_stats()
         n = self.n_obs
         hits = sum(1 for h in self.oos_hit if h)
         tot = sum(self.counts.values()) or 1.0
@@ -722,8 +750,9 @@ class Brain:
             "ig_vs_base_bits": round(self._last_ig_base, 5),
             "committed_steps": sum(1 for c in self.oos_committed if c),
             "provisional_steps": sum(1 for t in self.oos_tier if t == "provisional"),
-            "paper_roi_pct": round(self.roi_stats()["mean_pct"], 2),
-            "paper_roi_p_value": round(self.roi_stats()["p_value"], 5),
+            "paper_roi_pct": round(_roi["mean_pct"], 2),
+            "paper_roi_p_value": round(_roi["p_value"], 5),
+            "paper_roi_n": int(_roi["n"]),
             "counts": {s: int(self.counts[s]) for s in self.symbols},
             "freq_pct": {s: round(100.0 * self.counts[s] / tot, 2) for s in self.symbols},
             "order_weights": {str(o): round(w, 4)

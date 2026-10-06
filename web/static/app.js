@@ -237,6 +237,7 @@ function render() {
       </tr>`).join('') + '</tbody>';
   }
   if (st.trend) renderTrends();
+  renderTable();   /* the game screen draws from the same state */
   if (st.patterns) { $('#patterns-table').innerHTML = patternTable(st.patterns); }
   if (st.patterns3) { $('#patterns3-table').innerHTML = patternTable(st.patterns3); }
 
@@ -291,6 +292,316 @@ function render() {
             ${s.active ? `<button class="ghost tiny" data-del="${esc(s.name)}">delete</button>` : ''}</td>
       </tr>`).join('') + '</tbody>';
   renderConfig();
+}
+
+
+/* ==================================================================
+   TABLE VIEW — the game screen.
+
+   Three giant colour tiles. What a tap does depends on the phase:
+     before the round  -> stake that colour (tap again to take it off)
+     after the round   -> record the colour that came up
+   Same two actions as the dashboard, with targets you cannot miss.
+   ================================================================== */
+
+const MODE_KEY = 'buzzcast.view';
+
+function defaultStake() {
+  const c = (S.config && S.config.capital) || {};
+  return Number(c.default_split_stake) || 120;
+}
+
+/* hex -> rgba, so each tile can tint itself without color-mix() */
+function soft(hex, a) {
+  let h = String(hex || '#888').replace('#', '');
+  if (h.length === 3) h = h.split('').map(x => x + x).join('');
+  const n = parseInt(h, 16);
+  if (isNaN(n)) return 'rgba(136,136,136,' + a + ')';
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/* how many turns in a row that colour is currently on */
+function runOf(sym) {
+  const tail = (S.state && S.state.results_tail) || [];
+  let n = 0;
+  for (let i = tail.length - 1; i >= 0 && tail[i] === sym; i--) n++;
+  return n;
+}
+
+function setMode(m) {
+  document.body.classList.toggle('table-mode', m === 'table');
+  try { localStorage.setItem(MODE_KEY, m); } catch (e) {}
+  const b = $('#btn-mode');
+  if (b) b.textContent = m === 'table' ? 'Full dashboard →' : '◀ Table view';
+  renderTable();
+}
+
+function tapColour(sym) {
+  if (!S.state || S.ui.busy) return;
+  if (S.state.phase === 'await_result') { recordResult(sym); return; }   // record
+  S.ui.stakes[sym] = (S.ui.stakes[sym] || 0) > 0 ? 0 : defaultStake();   // toggle
+  renderTable();
+}
+
+function nudgeColour(sym, delta) {
+  if (!S.state || S.ui.busy || S.state.phase === 'await_result') return;
+  const c = S.state.capital || {};
+  const step = c.stake_step || 10;
+  const cap = c.max_stake_per_turn || 1e9;
+  S.ui.stakes[sym] = Math.max(0, Math.min((S.ui.stakes[sym] || 0) + delta * step, cap));
+  renderTable();
+}
+
+
+/* ==================================================================
+   THE READINESS LADDER
+
+   Answers the only question that matters before the bot has proven itself:
+   "should I be staking yet?" The answer is no until the bot's own PAPER TRADE
+   is significant - and passing every turn still records every result AND the
+   bot's own opinion, so the evidence builds at no financial risk.
+
+   The stage is derived from what the engine already reports, so the screen can
+   never disagree with the gate.
+   ================================================================== */
+
+function readiness(st) {
+  const c = st.capital || {};
+  const pr = st.prediction || {};
+  const br = st.brain || {};
+  const turns = c.turns || 0;
+  const nObs = br.n_obs || pr.n_obs || 0;
+
+  /* the engine's own warm-up figure, read out of its own blocker text so the
+     two can never drift apart */
+  let warm = 15;
+  (pr.blockers || []).concat(pr.reasons || []).forEach(t => {
+    const m = /(\d+)\s*\/\s*(\d+)\s*results seen/i.exec(t) || /(\d+)\s*\/\s*(\d+)/.exec(t);
+    if (m) warm = Math.max(warm, Number(m[2]));
+  });
+
+  const paper = Number(br.paper_roi_pct || 0);
+  const paperP = Number(br.paper_roi_p_value || 1);
+  const provisional = Number(br.provisional_steps || 0);
+  const paperN = Number(br.paper_roi_n || 0);
+
+  if (nObs < warm) {
+    return {
+      stage: 1, name: 'warming up', cls: '',
+      what: 'Record only. The bot cannot read anything yet.',
+      why: `${nObs} of ${warm} results seen before it is allowed an opinion.`,
+      paper: null, track: [nObs / Math.max(warm, 1), 0, 0, 0],
+    };
+  }
+  if (pr.tier === 'commit') {
+    return {
+      stage: 4, name: 'the bot has a proven edge', cls: 'done',
+      what: 'This is the signal you were waiting for.',
+      why: `its paper trade is ${pct(paper)} and statistically significant ` +
+           `(p=${paperP < 0.001 ? '<0.001' : paperP.toFixed(3)}).`,
+      paper: { v: paper, p: paperP, n: paperN },
+      track: [1, 1, 1, 1],
+    };
+  }
+  if (pr.tier === 'provisional') {
+    return {
+      stage: 3, name: 'close, not proven', cls: 'mid',
+      what: 'The bot is staking its own money at reduced size. Keep recording.',
+      why: 'its paper trade is positive but has not cleared the significance bar.',
+      paper: { v: paper, p: paperP, n: paperN },
+      track: [1, 1, 1, 0.5],
+    };
+  }
+  return {
+    stage: 2, name: 'earning its trust', cls: '',
+    what: 'Record only. Every round is evidence, and passing costs nothing.',
+    why: 'the bot has opinions but nothing proven yet. Measured: a real edge ' +
+         'first commits around turn 100-170, and by turn 500 if nothing has ' +
+         'committed the game is probably fair.',
+    paper: { v: paper, p: paperP, n: paperN },
+    track: [1, 0.35, 0, 0],
+  };
+}
+
+function renderReadiness(st) {
+  const host = $('#tv-stage');
+  if (!host) return;
+  const r = readiness(st);
+  const paper = r.paper && r.paper.n
+    ? `<div class="paper">bot's paper trade
+         <b class="${cls(r.paper.v)}">${pct(r.paper.v)}</b> over ${r.paper.n} turns
+         <div class="tiny dim">p = ${r.paper.p < 0.001 ? '<0.001' : r.paper.p.toFixed(3)}${r.paper.p > 0.0167 ? ' — not proven' : ' — significant'}</div>
+       </div>`
+    : `<div class="paper tiny dim">the bot's paper trade<br>builds while you record</div>`;
+  host.className = 'tv-stage ' + r.cls;
+  host.innerHTML = `
+    <div style="min-width:200px">
+      <div class="step">stage ${r.stage} of 4 · ${esc(r.name)}</div>
+      <div class="tv-track">${r.track.map(t =>
+        `<i class="${t >= 1 ? 'on' : ''}" style="${t > 0 && t < 1 ? 'background:linear-gradient(90deg,var(--acc) ' + Math.round(t * 100) + '%,#232b38 0)' : ''}"></i>`).join('')}</div>
+    </div>
+    <div>
+      <div class="what">${esc(r.what)}</div>
+      <div class="why">${esc(r.why)}</div>
+    </div>
+    ${paper}`;
+}
+
+function renderTable() {
+  const st = S.state;
+  if (!st || !$('#tv-tiles')) return;
+  const res = st.phase === 'await_result';
+  const c = st.capital || {};
+  const pr = st.prediction || {};
+  const bb = pr.bet || {};
+  const pend = st.pending || {};
+
+  /* --- the two-number setup card, only while nothing has been played --- */
+  const fresh = !c.turns || !!S.ui.forceSetup;
+  $('#tv-setup').classList.toggle('hidden', !fresh);
+  const note = $('#tv-setup-note');
+  if (note) note.innerHTML = c.turns
+    ? `you already have ${c.turns} recorded turns — starting over makes a
+       <b>new</b> session and leaves them untouched`
+    : '';
+  if (fresh && !$('#tv-setup').dataset.seeded) {
+    $('#tv-setup').dataset.seeded = '1';
+    $('#tv-bankroll').value = Math.round(c.start || 1000);
+    $('#tv-stake').value = Math.round(defaultStake());
+  }
+
+  renderReadiness(st);
+
+  /* --- the bot's line, small and out of the way --- */
+  const top = pr.top || st_symbols()[0];
+  const botBits = Object.keys(bb.stakes || {}).filter(k => bb.stakes[k] > 0)
+    .map(k => `<b style="color:${colourOf(k)}">${Math.round(bb.stakes[k])} ${esc(nameOf(k))}</b>`).join(' + ');
+  const line = bb.total > 0
+    ? `bot would play ${botBits} — ${money(bb.total)}`
+    : `bot reads <b style="color:${colourOf(top)}">${esc(nameOf(top))}</b> ` +
+      `${Math.round(pr.confidence || 0)}%, then passes on purpose`;
+  $('#tv-bot').innerHTML = line;
+  $('#tv-hint').innerHTML = res
+    ? `<b style="color:var(--acc)">▼ tap the colour that came up</b>`
+    : `tap a colour to stake your usual &middot; tap it again to take it off`;
+
+  /* --- the three tiles --- */
+  const total = st_symbols().reduce((a, s) => a + (S.ui.stakes[s] || 0), 0);
+  $('#tv-tiles').innerHTML = st_symbols().map(sym => {
+    const col = colourOf(sym);
+    const stake = S.ui.stakes[sym] || 0;
+    const mined = (pend.played_bet || {})[sym] || 0;
+    const pay = (st.payouts && st.payouts[sym]) || 3;
+    const style = `--c:${col};--cs:${soft(col, .16)}`;
+
+    if (res) {
+      /* after the round: this tile RECORDS. Show what the round is worth. */
+      const net = Math.round(mined * pay - (pend.stake_total || 0));
+      const worth = (pend.stake_total || 0) > 0
+        ? `<span class="tv-pay ${cls(net)}">${net > 0 ? '+' : ''}${Math.round(net)}</span>
+           <span class="tv-sub">if ${esc(nameOf(sym).toLowerCase())} comes up</span>`
+        : `<span class="tv-pay mut">record</span>
+           <span class="tv-sub">nothing staked this round</span>`;
+      return `<div class="tv-tile armed${mined > 0 ? ' on' : ''}" style="${style}" data-rec="${sym}">
+          <span class="tv-tapme">tap when it lands</span>
+          <span class="tv-name">${esc(nameOf(sym))}</span>
+          ${worth}
+        </div>`;
+    }
+
+    /* before the round: this tile STAKES. */
+    const r = runOf(sym);
+    const bits = [];
+    if (stake > 0) bits.push(`pays ${Math.round(stake * pay - stake)} if it wins`);
+    if (r >= 2) bits.push(`on a run of ${r}`);
+    return `<div class="tv-tile${stake > 0 ? ' on' : ''}" style="${style}" data-tap="${sym}">
+        <span class="tv-name">${esc(nameOf(sym))}</span>
+        <span class="tv-stake num">${stake > 0 ? Math.round(stake) : '—'}</span>
+        <span class="tv-sub">${bits.join(' · ') || 'tap to stake'}</span>
+        <span class="tv-chip">
+          <button data-nudge="${sym}:-1" title="less">−</button>
+          <button data-nudge="${sym}:1" title="more">+</button>
+        </span>
+      </div>`;
+  }).join('');
+
+  /* --- action row, one big button each --- */
+  const minS = c.min_stake || 1;
+  if (res) {
+    $('#tv-actions').innerHTML = `
+      <button id="tv-cancel" class="ghost">Cancel this bet <span class="tiny dim">(esc — costs nothing)</span></button>
+      <button id="tv-undo" class="ghost">Undo the last recorded turn</button>`;
+  } else {
+    const ok = total >= minS;
+    $('#tv-actions').innerHTML = `
+      <button id="tv-lock" class="primary" ${ok ? '' : 'disabled'}>
+        ${total > 0 ? `Lock in ${money(total)}` : 'Lock in'}</button>
+      <button id="tv-pass" class="ghost">Pass <span class="tiny dim">(p)</span></button>`;
+  }
+
+  /* --- the recent-results strip: the game's own ticker --- */
+  const tail = (st.results_tail || []).slice(-16);
+  const last = (st.recent_turns || [])[0];
+  $('#tv-strip').innerHTML =
+    `<span class="small mut" style="margin-right:6px">last ${tail.length}</span>` +
+    tail.map(sym =>
+      `<span class="tv-dot" style="background:${colourOf(sym)}">${esc(nameOf(sym)[0] || '?')}</span>`
+    ).join('') +
+    (last ? `<span class="small ${cls(last.pnl)}" style="margin-left:10px">
+        turn ${last.n}: ${money(last.pnl)}</span>` : '');
+
+  /* --- wire the taps (fresh elements every render) --- */
+  $$('[data-tap]').forEach(el => el.onclick = () => tapColour(el.dataset.tap));
+  $$('[data-rec]').forEach(el => el.onclick = () => recordResult(el.dataset.rec));
+  $$('[data-nudge]').forEach(el => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const [sym, d] = el.dataset.nudge.split(':');
+      nudgeColour(sym, Number(d));
+    };
+  });
+  const lock = $('#tv-lock');
+  if (lock) lock.onclick = () => lockBet();
+  const pass = $('#tv-pass');
+  if (pass) pass.onclick = () => act(async () => {
+    await api('/api/pass', {}); await refresh();
+  }, 'passed — the result still teaches the model');
+  const undo = $('#tv-undo');
+  if (undo) undo.onclick = () => act(async () => {
+    await api('/api/undo', {}); await refresh();
+  }, 'last turn undone');
+  const cancel = $('#tv-cancel');
+  if (cancel) cancel.onclick = () => act(async () => {
+    await api('/api/cancel', {}); await refresh();
+  }, 'bet cancelled — nothing lost');
+}
+
+function wireTable() {
+  const b = $('#btn-mode');
+  if (b) b.onclick = () => setMode(document.body.classList.contains('table-mode') ? 'dash' : 'table');
+
+  const re = $('#tv-reopen');
+  if (re) re.onclick = () => { S.ui.forceSetup = true; renderTable(); };
+
+  const start = $('#tv-start');
+  if (start) start.onclick = () => act(async () => {
+    const bank = Number($('#tv-bankroll').value);
+    const stake = Number($('#tv-stake').value);
+    if (!(bank > 0) || !(stake > 0)) { toast('both numbers need to be above zero', true); return; }
+    if (stake * 2 > bank) { toast('two colours at ' + stake + ' is more than your bankroll', true); return; }
+    await api('/api/config', { patch: { capital: {
+      starting: bank,
+      default_split_stake: stake,
+      min_stake: Math.min(10, stake),
+      /* room for the two-colour bet, and never more than a fifth of the roll */
+      max_stake_per_turn: Math.max(stake * 2, Math.round(bank * 0.2)),
+    } } });
+    await api('/api/session', { action: 'new', name: 'real', starting: bank });
+    await refresh();
+    $('#tv-setup').dataset.seeded = '';
+    S.ui.forceSetup = false;
+    toast('you are set up — tap a colour to place your first bet');
+  });
 }
 
 function betText(_x, played, compact) {
@@ -759,7 +1070,13 @@ function renderConfig() {
 }
 
 /* ---------------------------------------------------------------- boot */
-refresh().then(() => { populateSimSelects(); wire(); wireKeys(); }).catch(e => {
+api('/api/config').then(d => { S.config = d.config; }).catch(() => {})
+  .then(() => refresh()).then(() => { populateSimSelects(); wire(); wireKeys(); wireTable(); })
+  .then(() => {
+    let m = 'table';
+    try { m = localStorage.getItem(MODE_KEY) || 'table'; } catch (e) {}
+    setMode(m);
+  }).catch(e => {
   document.body.insertAdjacentHTML('afterbegin',
     `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
 });

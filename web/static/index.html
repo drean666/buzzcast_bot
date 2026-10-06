@@ -17,10 +17,57 @@
   <span id="phase" class="pill live">loading</span>
   <div class="row" style="margin-left:auto">
     <select id="session-select" style="width:auto" title="session"></select>
+    <button id="btn-mode" class="ghost small">◀ Table view</button>
     <button id="btn-new-session" class="ghost small">+ session</button>
     <button id="btn-refresh" class="ghost small">refresh</button>
   </div>
 </header>
+
+<section id="table-view">
+
+  <!-- shown only before the first turn: two numbers and you are playing -->
+  <div id="tv-setup" class="tv-setup hidden">
+    <h3>Two numbers and you're playing</h3>
+    <p class="small mut" style="margin:0">
+      Everything else the engine needs is already set to a sane default — you can
+      change any of it later under <b>Settings → every rule</b>.</p>
+    <div class="tv-setup-grid">
+      <label class="tv-field">
+        <span class="small mut">Your bankroll</span>
+        <input type="number" id="tv-bankroll" min="10" step="10" value="1000">
+        <span class="tiny dim">the money you're actually playing with</span>
+      </label>
+      <label class="tv-field">
+        <span class="small mut">Stake per colour</span>
+        <input type="number" id="tv-stake" min="1" step="10" value="120">
+        <span class="tiny dim">your real bet — you play two colours, so each round costs 2× this</span>
+      </label>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="tv-start">Start playing</button>
+      <span class="small mut" id="tv-setup-note"></span>
+    </div>
+  </div>
+
+  <div id="tv-stage" class="tv-stage"></div>
+
+  <div class="tv-bar">
+    <span class="tv-bot" id="tv-bot"></span>
+    <span class="tv-hint" id="tv-hint"></span>
+  </div>
+
+  <div class="tv-tiles" id="tv-tiles"></div>
+  <div class="tv-actions" id="tv-actions"></div>
+  <div class="tv-strip" id="tv-strip"></div>
+  <div class="tiny dim" style="margin-top:12px">
+    <b>keys</b> · <code>R</code>/<code>B</code>/<code>G</code> record the result ·
+    <code>space</code> repeat last bet · <code>1</code>–<code>6</code> presets ·
+    <code>enter</code> lock in · <code>p</code> pass
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button id="tv-reopen" class="ghost small">change bankroll / stake →</button>
+  </div>
+</section>
 
 <main>
   <!-- ============ LEFT: the turn ============ -->
@@ -275,12 +322,20 @@
         <div class="scroll"><table id="sessions-table"></table></div>
       </div>
       <div class="panel">
-        <h3>Rules &amp; risk (edit, then Save)</h3>
-        <div id="config-editor"></div>
-        <div class="row" style="margin-top:12px">
-          <button id="btn-save-config" class="primary">Save &amp; reload</button>
-          <span id="cfg-status" class="small mut"></span>
-        </div>
+        <h3>Everything the engine uses</h3>
+        <p class="small mut" style="margin:0 0 10px">
+          You never <i>have</i> to touch any of this — the two numbers in the
+          setup card are the only ones that change how it behaves in practice.
+          They are all here for the curious, and for when you want to
+          deliberately play looser or tighter than the defaults.</p>
+        <details>
+          <summary style="cursor:pointer" class="small">every rule (advanced)</summary>
+          <div id="config-editor" style="margin-top:10px"></div>
+          <div class="row" style="margin-top:12px">
+            <button id="btn-save-config" class="primary">Save &amp; reload</button>
+            <span id="cfg-status" class="small mut"></span>
+          </div>
+        </details>
       </div>
     </div>
   </div>

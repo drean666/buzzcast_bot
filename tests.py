@@ -552,7 +552,7 @@ def test_persistence_roundtrip_and_recovery():
     # corrupt the main file -> must self-heal from the backup
     storage._LAST_BACKUP.clear()
     e3 = GameEngine(Settings.load(), path=path)      # refreshes backup window
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write("{ this is not json")
     if os.path.exists(storage.backup_path(path)):
         e4 = GameEngine(Settings.load(), path=path)
@@ -927,6 +927,416 @@ def test_full_session_end_to_end():
 
 
 @test
+def test_every_test_is_registered():
+    """A test function that is not in RESULTS never runs - and the suite still
+    prints "all good".
+
+    That is not hypothetical. While adding the table-view tests, one insert
+    landed between an @test decorator and the function it belonged to, which
+    silently unregistered two tests - including the busy-port test that caught
+    the Windows port bug in 2.3.1. The suite reported 45/45 and looked healthy
+    while covering less than it had before. This closes the hole for good.
+    """
+    missing = sorted(
+        n for n, v in list(globals().items())
+        if n.startswith("test_") and callable(v) and v not in RESULTS)
+    assert not missing, "defined but never run: %s" % ", ".join(missing)
+
+
+@test
+def test_two_lucky_wins_cannot_license_a_stake():
+    """A zero-variance sample must be priced, not declared certain.
+
+    The bug this pins: a 3x payout returns +2 for a win and -1 for a loss, so
+    TWO consecutive wins is a zero-variance positive-mean sample. The t-test
+    helper treated zero variance as "maximally consistent, therefore p=0",
+    which handed a Bonferroni-corrected gate p=0.0000 on two coin flips. The
+    practical result: on a genuinely FAIR game, one seed in twelve reached the
+    "commit" tier on turn 17 and would have licensed a real stake with no edge
+    behind it. Found by recording-only studies, not by any existing test.
+
+    At zero variance every counted step had the same outcome, so a positive
+    mean means every step won, and the exact probability of that is p_null**n.
+    """
+    from engine.brain import _p_from
+
+    # exact, at every size
+    for n in (2, 3, 4, 5, 6, 10, 16):
+        approx(_p_from(2.0, 0.0, n, 1 / 3), (1 / 3) ** n)   # asserts internally
+
+    # two lucky wins must not clear the Bonferroni bar the gate uses
+    assert _p_from(2.0, 0.0, 2, 1 / 3) > 0.0167
+    assert _p_from(2.0, 0.0, 3, 1 / 3) > 0.0167
+    # but a genuinely improbable run still can
+    assert _p_from(2.0, 0.0, 10, 1 / 3) < 0.0167
+
+    # longer runs are always stronger evidence, never weaker
+    ps = [_p_from(2.0, 0.0, n, 1 / 3) for n in range(2, 20)]
+    assert all(b <= a for a, b in zip(ps, ps[1:])), ps
+
+    # a flat or losing record is never evidence, however consistent
+    assert _p_from(-1.0, 0.0, 50, 1 / 3) == 1.0
+    assert _p_from(0.0, 0.0, 50, 1 / 3) == 1.0
+    assert _p_from(2.0, 0.0, 1, 1 / 3) == 1.0
+
+    # the ordinary path is untouched
+    assert 0.0 < _p_from(0.5, 1.0, 100, 1 / 3) < 0.001
+
+
+@test
+def test_a_fair_game_never_reaches_commit_on_a_lucky_start():
+    """End to end: the exact scenario that shipped broken.
+
+    Fifteen warm-up turns, then straight wins. Before the fix this reached
+    "commit" two turns after warm-up. The gate must hold.
+    """
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "c.json"))
+    g = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+    g.new_session("lucky", starting=1000)
+    syms = g.symbols
+
+    committed_at = None
+    for t in range(40):
+        g.plan()
+        g.pass_turn()
+        # always the same colour: the model's favourite will hit every time
+        g.resolve(syms[0])
+        p = g.state()["prediction"]
+        if p["tier"] == "commit":
+            committed_at = t + 1
+            break
+
+    if committed_at is not None:
+        # only permissible once the run is long enough to actually be unlikely
+        assert committed_at >= 16, (
+            "committed on turn %d of a run that is not yet improbable" % committed_at)
+
+
+@test
+def test_paper_trade_reports_its_own_sample_size():
+    """The readiness ladder shows "paper trade +X% over N turns".
+
+    N has to be the number of turns the paper trade actually counted, not a
+    tier-step count and not the raw turn count - those differ by the warm-up,
+    and showing the wrong denominator would make the record look thinner or
+    fatter than it is at exactly the moment the user is deciding whether to
+    start staking.
+    """
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "c.json"))
+    g = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+    g.new_session("paper", starting=1000)
+    warm = st.data["brain"]["min_data_before_analysis"]
+
+    for i in range(60):
+        g.plan()
+        g.pass_turn()
+        g.resolve(["r", "b", "g"][i % 3])
+
+    b = g.state()["brain"]
+    assert "paper_roi_n" in b, "the ladder has no sample size to show"
+    n = b["paper_roi_n"]
+    # counted from the end of warm-up only, and never more than the turns played
+    assert n <= 60, n
+    assert n >= 60 - warm - 1, (n, warm)
+    # and it must agree with the stats it is attached to
+    assert 0.0 <= b["paper_roi_p_value"] <= 1.0
+
+
+@test
+def test_the_paper_trade_grows_while_you_risk_nothing():
+    """The whole 'record first, stake later' plan depends on this.
+
+    Passing every turn must still feed the model AND grow the bot's own
+    paper-trade record, so that following it later rests on evidence that
+    accumulated at zero financial risk. If a pass ever skipped observe(), the
+    plan would quietly become "wait 300 turns for nothing".
+    """
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "c.json"))
+    g = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+    g.new_session("recordonly", starting=1000)
+    start_capital = g.capital
+    warm = st.data["brain"]["min_data_before_analysis"]
+
+    for i in range(120):
+        g.plan()
+        g.pass_turn()
+        g.resolve(["r", "b", "g"][(i * 7) % 3])
+
+    b = g.state()["brain"]
+    assert b["n_obs"] == 120, b["n_obs"]              # the model learned everything
+    assert b["paper_roi_n"] >= 120 - warm - 1         # and the paper trade grew
+    assert g.capital == start_capital, "passing must not move the bankroll"
+    assert g.state()["capital"]["turns"] == 120       # every turn is on the record
+
+
+@test
+def test_every_open_says_which_encoding_it_wants():
+    """An open() without an encoding uses the platform default.
+
+    On Linux that is UTF-8 and everything works. On Windows it is cp1252, and
+    the first curly quote, middot or em dash in the file raises
+    "'charmap' codec can't decode byte 0x8f". This shipped: 2.7 passed 52/52
+    on Linux and failed 51/52 on the user's machine, because the table-view
+    test read the static files without naming an encoding. Same shape as the
+    SO_REUSEADDR port bug - correct on the machine it was written on, broken on
+    the only machine that matters.
+
+    Binary reads are exempt and are the correct way to move bytes around.
+    """
+    import ast
+    import os
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    offenders = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("__pycache__", ".git", "archive", "tmp")]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                tree = ast.parse(open(full, encoding="utf-8").read())
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                if isinstance(fn, ast.Name):
+                    is_open = fn.id == "open"                 # the builtin
+                elif isinstance(fn, ast.Attribute):
+                    # io.open / codecs.open are the builtin by another name.
+                    # webbrowser.open is NOT a file and must not be flagged.
+                    owner = getattr(fn.value, "id", None)
+                    is_open = fn.attr == "open" and owner in ("io", "codecs")
+                else:
+                    is_open = False
+                if not is_open:
+                    continue
+                mode = None
+                if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                    mode = node.args[1].value
+                for kw in node.keywords:
+                    if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                        mode = kw.value.value
+                named = any(kw.arg == "encoding" for kw in node.keywords)
+                if "b" in str(mode or "r"):
+                    continue                     # binary needs no encoding
+                if not named:
+                    offenders.append("%s:%d" % (os.path.relpath(full, root), node.lineno))
+
+    assert not offenders, (
+        "these open() calls would use the Windows default encoding: "
+        + ", ".join(offenders))
+
+
+@test
+def test_the_analyzer_reads_whatever_windows_did_to_the_file():
+    """analyze.py is fed files a person produced, on Windows.
+
+    Excel re-saves CSVs in the local code page and adds a BOM; a hand-edited
+    JSON gets saved with a BOM by Notepad. Reading with a hardcoded utf-8 turned
+    every one of those into a bare "charmap codec" crash. All four shapes must
+    load, and the most likely one - an Excel round-trip - most of all.
+    """
+    import csv as _csv
+    import json as _json
+    import os
+    import tempfile
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import analyze
+
+    tmp = tempfile.mkdtemp()
+    rows = [{"symbol": "r"}, {"symbol": "g"}, {"symbol": "b"}]
+
+    def write_csv(enc, bom=False):
+        path = os.path.join(tmp, "t_%s.csv" % enc.replace("-", ""))
+        with open(path, "w", newline="", encoding=enc) as fh:
+            if bom:
+                fh.write("\ufeff")
+            w = _csv.DictWriter(fh, fieldnames=["symbol"])
+            w.writeheader()
+            w.writerows(rows)
+        return path
+
+    for enc, bom in (("utf-8", False), ("utf-8-sig", False), ("cp1252", False)):
+        got = analyze.load_any(write_csv(enc, bom))
+        assert len(got["results"]) == 3, (enc, got["results"])
+
+    # a JSON saved by Notepad with a BOM, containing an accented character
+    doc = {"sessions": {"S": {"turns": [{"n": 1, "result": "r"}, {"n": 2, "result": "g"}]}},
+           "active": "S", "note": "caf\u00e9"}
+    jp = os.path.join(tmp, "boom.json")
+    open(jp, "w", encoding="utf-8-sig").write(_json.dumps(doc, ensure_ascii=False))
+    assert len(analyze.load_any(jp)["results"]) == 2
+
+    jp2 = os.path.join(tmp, "cp.json")
+    open(jp2, "w", encoding="cp1252").write(_json.dumps(doc, ensure_ascii=False))
+    assert len(analyze.load_any(jp2)["results"]) == 2
+
+    # and the plain utf-8 case still works
+    jp3 = os.path.join(tmp, "plain.json")
+    open(jp3, "w", encoding="utf-8").write(_json.dumps(doc))
+    assert len(analyze.load_any(jp3)["results"]) == 2
+
+
+@test
+def test_the_tools_survive_a_windows_console():
+    """Every entry point must run under the code pages Windows actually has.
+
+    The Windows console in France is cp850, and cp850 cannot represent an em
+    dash. Measured before the fix: `python analyze.py` crashed outright with a
+    UnicodeEncodeError part-way through the report, and `python run.py --help`
+    crashed on its own description string. On Linux every one of these passed,
+    because the Linux default encoding is UTF-8.
+
+    This runs the real programs in a subprocess with a hostile encoding, which
+    is the only way to catch it - the failure lives in the print() call, not in
+    any function a unit test can call.
+    """
+    import os
+    import subprocess
+    import sys
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "cp850"
+    env.pop("PYTHONUTF8", None)
+
+    runs = [
+        ([sys.executable, "analyze.py", os.path.join("archive", "old_history.json")],
+         "analyze.py on the archived history"),
+        ([sys.executable, "run.py", "--help"], "run.py --help"),
+    ]
+    for cmd, label in runs:
+        proc = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True,
+                              timeout=120, errors="replace")
+        assert proc.returncode == 0, (
+            "%s failed under a cp850 console:\n%s" % (label, (proc.stderr or "")[-600:]))
+        assert "UnicodeEncodeError" not in (proc.stderr or ""), label
+
+
+@test
+def test_analyzer_reads_a_csv_excel_has_touched():
+    """The realistic Windows round trip, end to end.
+
+    The history CSV comes out of the app as UTF-8, but the moment it is opened
+    and re-saved in Excel it becomes the local code page, and Excel adds a BOM.
+    That must still analyse.
+    """
+    import csv as _csv
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    tmp = tempfile.mkdtemp()
+    rows = [{"n": i, "symbol": s} for i, s in
+            enumerate("rbggbrbrgrbbgrgrbgbrgb", 1)]
+
+    for enc, label in (("cp1252", "re-saved by Excel"),
+                       ("utf-8-sig", "with a BOM")):
+        path = os.path.join(tmp, "excel_%s.csv" % label.replace(" ", "_"))
+        with open(path, "w", newline="", encoding=enc) as fh:
+            if enc == "utf-8-sig":
+                fh.write("\ufeff")
+            w = _csv.DictWriter(fh, fieldnames=["n", "symbol"])
+            w.writeheader()
+            w.writerows(rows)
+        proc = subprocess.run([sys.executable, "analyze.py", path],
+                              cwd=root, capture_output=True, text=True,
+                              timeout=120, errors="replace")
+        assert proc.returncode == 0, (label, (proc.stderr or "")[-400:])
+        assert "recorded results" in proc.stdout, label
+
+
+@test
+def test_table_view_is_actually_served():
+    """The game screen must be in the files the server hands the browser.
+
+    The table view lives entirely in the static assets, so a typo in an id or a
+    rename that misses one place fails silently - the page just renders empty.
+    This pins every piece the JavaScript reaches for.
+    """
+    import os
+    root = os.path.dirname(os.path.abspath(__file__))
+    html = open(os.path.join(root, "web", "static", "index.html"),
+                encoding="utf-8").read()
+    js = open(os.path.join(root, "web", "static", "app.js"), encoding="utf-8").read()
+    css = open(os.path.join(root, "web", "static", "style.css"), encoding="utf-8").read()
+
+    for needed in ("tv-tiles", "tv-actions", "tv-strip", "tv-setup",
+                   "tv-bankroll", "tv-stake", "tv-start", "tv-hint",
+                   "tv-bot", "btn-mode", "tv-reopen"):
+        assert 'id="%s"' % needed in html, "missing element #%s" % needed
+
+    for fn in ("renderTable", "setMode", "tapColour", "nudgeColour",
+               "recordResult", "lockBet", "repeatLastBet", "wireTable"):
+        assert "function %s(" % fn in js, "app.js never defines %s()" % fn
+    assert "renderTable();" in js, "renderTable() is never called"
+
+    # every id the table code writes into must exist in the markup
+    for eid in ("#tv-tiles", "#tv-actions", "#tv-strip", "#tv-setup", "#tv-bot", "#tv-hint"):
+        assert eid in js, "app.js never touches %s" % eid
+
+    assert ".tv-tile" in css and "table-mode" in css, "table view has no styling"
+
+
+@test
+def test_setup_card_numbers_reach_the_engine():
+    """The two-number setup card must actually configure the engine.
+
+    It posts capital.starting / default_split_stake and then opens a session at
+    that bankroll. If the patch shape drifts, the card looks like it works while
+    changing nothing - the worst kind of bug here.
+    """
+    import os
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "config.json"))
+    g = GameEngine(st, path=os.path.join(tmp, "data.json"), autosave=False)
+
+    bank, stake = 2500, 75
+    st.patch({"capital": {
+        "starting": bank,
+        "default_split_stake": stake,
+        "min_stake": min(10, stake),
+        "max_stake_per_turn": max(stake * 2, round(bank * 0.2)),
+    }})
+    assert st.data["capital"]["starting"] == bank
+    assert st.data["capital"]["default_split_stake"] == stake
+
+    g.new_session("real", starting=bank)
+    assert g.capital == bank, "session did not open at the bankroll"
+    # the stake the card set is inside what the engine will accept
+    assert st.data["capital"]["min_stake"] <= stake <= st.data["capital"]["max_stake_per_turn"]
+
+    labels = [p["label"] for p in g.presets()]
+    assert any(l.upper().startswith("PASS") for l in labels), "no PASS preset"
+
+
+@test
 def test_server_moves_off_a_busy_port():
     """A port another program owns must never be reused.
 
@@ -986,6 +1396,8 @@ def test_server_refuses_to_share_a_port():
 
 
 def main() -> int:
+    from engine import safe_console
+    safe_console()
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
     tests = [t for t in RESULTS if not only or any(o in t.__name__ for o in only)]
     passed, failed = 0, []

@@ -20,6 +20,8 @@ from web.server import serve                  # noqa: E402
 
 
 def main() -> None:
+    from engine import safe_console
+    safe_console()
     ap = argparse.ArgumentParser(description="buzzcast — capital simulator")
     ap.add_argument("--host", default=None)
     ap.add_argument("--port", type=int, default=None)

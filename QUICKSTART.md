@@ -37,22 +37,96 @@ A black window opens and your browser opens by itself.
 
 ---
 
-## Part 3 — Tell it how much money you have (4 steps, once)
+## Part 3 — Two numbers (once)
 
-The simulator starts at 1,000 coins. That is a placeholder. Until you change it,
-every number on screen is advice about money you don't have.
+The first time you open it, the screen asks for exactly two things:
 
-**1.** Click the **Settings** tab
-**2.** Change `capital → starting` to your real bankroll (e.g. `3000`)
-**3.** Click **Save & reload**
-**4.** Click **+ session** in the top right corner, name it `real`
+| | |
+|---|---|
+| **Your bankroll** | the money you're actually playing with |
+| **Stake per colour** | your real bet — you play two colours, so a round costs 2× this |
 
-Then, still on the Settings tab: set `default split stake` to what you actually
-put on a colour (e.g. `150`). That makes the preset button match how you play.
+Type them, press **Start playing**, and you're done. Every other setting in the
+engine is already at a sane default and you never have to look at it.
 
----
+That's the whole configuration. If you want to change the bankroll or stake
+later, press **change bankroll / stake** at the bottom of the table screen.
+
+> Anything deeper — the confidence bar, the Kelly fraction, how much the model
+> decays old results — is under **Settings → every rule**, folded away in a
+> disclosure. It's there for the curious. Nothing in there is needed to use the
+> tool, and the defaults are the values we measured.
 
 ## Part 4 — Playing and recording
+
+### The screen
+
+You get one screen with **three big colour tiles**, one per colour. That's it.
+What a tap does depends on where the round is:
+
+| the round is… | the tiles say… | a tap… |
+|---|---|---|
+| **not started** | the stake you have on each colour | **puts your usual stake on that colour** (tap again to take it off) |
+| **resolved** | what each colour pays, e.g. `+120` / `−240` | **records the colour that came up** |
+
+The line across the top keeps the bot's opinion in one sentence — it never takes
+over the screen, because you don't have to agree with it. The row of coloured
+squares underneath is the running ticker of recent results.
+
+Everything the dashboard shows is still there; press **Full dashboard →** in the
+top right whenever you want it. Your browser remembers which one you prefer.
+
+### The four stages — what to do right now
+
+There's a strip across the top of the game screen that always tells you where
+you are. Here is what it means:
+
+| stage | results recorded | what you do |
+|---|---|---|
+| **1 · warming up** | 0–14 | **Record only.** The bot isn't allowed an opinion yet. |
+| **2 · earning its trust** | 15+ | **Record only.** The bot has opinions, none proven. |
+| **3 · close, not proven** | — | Keep recording. The bot has a positive record but hasn't cleared the bar. |
+| **4 · proven edge** | — | **This is the signal.** The bot's own record is statistically significant. |
+
+### Why "record only" is free
+
+This is the part that makes the whole thing work. Every turn, the bot does two
+things on its own:
+
+1. it **watches the result** and learns from it, and
+2. it **records what it would have bet**, and settles that bet on paper.
+
+Neither of those needs a penny from you. So while you press `p` and tap R/B/G,
+the bot is quietly building its own fully-settled betting record — the paper
+trade. **That record is the evidence the bot uses to decide when it's allowed
+to stake.**
+
+The strip shows it: `bot's paper trade +14.2% over 125 turns, p = 0.041 — not proven`.
+
+When that turns into `proven`, the bot has earned the right to be followed, and
+you will not have risked anything to find out.
+
+### How long does that take?
+
+Measured on 12 independent games per row, record-only:
+
+| the game | first positive-but-unproven | **first proven edge** |
+|---|---|---|
+| no edge at all (fair) | ~186 turns, or never | **never** |
+| a mild bias | ~73 turns | **~170 turns** (90% by 253) |
+| real momentum (thin) | ~71 turns | ~160 turns (90% by 564) |
+| strong momentum | ~25 turns | **~100 turns** (90% by 205) |
+
+Read the last column as your answer:
+
+- **A real edge shows up around turn 100–170.** Often sooner if the edge is big.
+- **If nothing has proven by turn 500, the game is probably fair.** That is a
+  result, not a failure — it tells you to keep your money in your pocket.
+- **Under 100 turns proves nothing either way.** Don't draw a conclusion yet.
+
+So the honest plan is: **record 100–200 turns first.** If the strip reaches
+stage 4, start following the bot. If it's still at stage 2 by turn 500, the
+game has no usable pattern and you've lost nothing finding that out.
 
 ### Set up your screen once
 
@@ -70,8 +144,9 @@ if you have to alt-tab to record, you'll stop recording.
 | **record the result** | <code>R</code> / <code>B</code> / <code>G</code> |
 | cancel a bet you just placed | <code>Esc</code> |
 
-**The important one is R / B / G.** When a round resolves you just tap the key
-for what came up. No clicking, no aiming, no typing.
+**The important one is R / B / G.** When a round resolves you tap the key for
+what came up — or tap the matching colour tile, whichever you prefer. No aiming
+at small buttons either way.
 
 So a normal turn is:
 
@@ -212,6 +287,11 @@ game has memory.
 ---
 
 ## If something goes wrong
+
+**Seeing `?` where a dash should be in the console?**
+That's your Windows console's code page, not a bug. It only affects decorative
+characters, never your data. To see them properly, type `chcp 65001` in the
+window before running the command.
 
 | message | fix |
 |---|---|
