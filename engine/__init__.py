@@ -14,6 +14,6 @@ game.py       GameEngine — the ledger is the single source of truth
 simulate.py   headless auto-play / replay lab
 """
 
-__version__ = "2.2.0"
+__version__ = "2.3.1"
 
 from .settings import Settings, base_dir  # noqa: F401

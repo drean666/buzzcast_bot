@@ -825,6 +825,65 @@ def test_full_session_end_to_end():
     assert st["shape_lab"] and st["patterns"] is not None
 
 
+@test
+def test_server_moves_off_a_busy_port():
+    """A port another program owns must never be reused.
+
+    The blocker is deliberately created WITHOUT SO_REUSEADDR, because that is
+    what a real other program looks like. The first version of this test set
+    SO_REUSEADDR on the blocker, which tests nothing on Windows: there
+    SO_REUSEADDR means "allow sharing this port", so both the blocker and the
+    availability probe could hold it at once and the busy port was reported as
+    free. On Unix it refused, so the bug only ever showed up on the user's
+    Windows machine.
+    """
+    import socket
+    from web.server import bind_server
+
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    base = None
+    for cand in (19661, 19662, 19663, 19664):
+        try:
+            blocker.bind(("127.0.0.1", cand))
+            base = cand
+            break
+        except OSError:
+            continue
+    if base is None:
+        blocker.close()
+        return                       # no free port to run the test on
+    blocker.listen(1)
+    httpd = None
+    try:
+        httpd, port = bind_server("127.0.0.1", base)
+        assert port != base, f"server bound to the busy port {port}"
+        assert port > base, port
+        # the port it chose must genuinely accept connections
+        probe = socket.create_connection(("127.0.0.1", port), timeout=5)
+        probe.close()
+    finally:
+        if httpd is not None:
+            httpd.server_close()
+        blocker.close()
+
+
+@test
+def test_server_refuses_to_share_a_port():
+    """On Windows allow_reuse_address lets two servers share a port silently.
+
+    Guard against that being switched on: the class attribute must be False on
+    nt and the bind must be the thing that decides availability.
+    """
+    import os as _os
+    from web.server import Server
+    if _os.name == "nt":
+        assert Server.allow_reuse_address is False, \
+            "on Windows this allows buzzcast to attach to another program's port"
+    else:
+        assert Server.allow_reuse_address is True, \
+            "on Unix this is what permits a restart without waiting out TIME_WAIT"
+
+
 def main() -> int:
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
     tests = [t for t in RESULTS if not only or any(o in t.__name__ for o in only)]

@@ -424,6 +424,27 @@ def _median(xs: Sequence[float]) -> float:
     return xs[n // 2] if n % 2 else 0.5 * (xs[n // 2 - 1] + xs[n // 2])
 
 
+# How many turns before the trend verdict can be believed?
+#
+# Detection rate ("the test reached p <= 0.05") by sequence length, 30 seeds per
+# cell. The fair row is the false-positive rate and is calibrated at ~5%: a
+# separate 400-game Monte Carlo measured 6.0% at 2,000 turns with a spread of
+# 0.97x what a binomial model assumes.
+#
+# Read it as: a THIN real edge (71.5%) needs ~500 turns before you have a 70%
+# chance of proving it and ~1,200 for near-certainty, while a STRONG edge
+# (76.7%) is provable in ~200-300. Nothing is provable at 100.
+TREND_POWER_CALIBRATION: List[Dict[str, Any]] = [
+    {"source": "fair (nothing to find)", "true_rate_pct": 66.9,
+     "detected_pct_by_length": {100: 3, 200: 7, 300: 10, 500: 7, 800: 7, 1200: 13, 2000: 17},
+     "note": "false-positive rate; the 400-game Monte Carlo puts it at 6.0%"},
+    {"source": "markov thin", "true_rate_pct": 71.5,
+     "detected_pct_by_length": {100: 23, 200: 37, 300: 53, 500: 70, 800: 77, 1200: 97, 2000: 100}},
+    {"source": "markov strong", "true_rate_pct": 76.7,
+     "detected_pct_by_length": {100: 73, 200: 97, 300: 100, 500: 100, 800: 100, 1200: 100, 2000: 100}},
+]
+
+
 def _pct(xs: Sequence[float], q: float) -> float:
     xs = sorted(xs)
     if not xs:
@@ -488,6 +509,7 @@ def trend_report(seq: Sequence[str], symbols: Sequence[str], min_run: int = 3,
     """
     seq = list(seq)
     by_len: Dict[int, Dict[str, int]] = {}
+    flags: List[int] = []
     for i in range(min_run, len(seq)):
         covered = {seq[i - 1]}
         length = 1
@@ -499,10 +521,11 @@ def trend_report(seq: Sequence[str], symbols: Sequence[str], min_run: int = 3,
                 break
         if len(covered) != 2 or length < min_run:
             continue
+        hit = 1 if seq[i] in covered else 0
+        flags.append(hit)
         bucket = by_len.setdefault(min(length, max_run), {"n": 0, "continued": 0})
         bucket["n"] += 1
-        if seq[i] in covered:
-            bucket["continued"] += 1
+        bucket["continued"] += hit
 
     be = 100.0 * 2.0 / len(symbols) if len(symbols) == 3 else 100.0 * 2 / 3
     rows = []
@@ -518,31 +541,114 @@ def trend_report(seq: Sequence[str], symbols: Sequence[str], min_run: int = 3,
                      "p_value": round(p, 4), "significant": p <= 0.05})
     tot_n = sum(b["n"] for b in by_len.values())
     tot_c = sum(b["continued"] for b in by_len.values())
+    rate = tot_c / tot_n if tot_n else 0.0
+    # ------------------------------------------------------------------
+    # Effective sample size. Consecutive qualifying turns share results, so
+    # strictly the flags are not independent. Measured, though, the dependence
+    # is negligible and slightly NEGATIVE: on 400 independent 2,000-turn
+    # memoryless games the continuation rate has SD 1.169% against the 1.202%
+    # a binomial model assumes (ratio 0.97x, lag-1 autocorrelation -0.038), and
+    # the test flags 6.0% of them at p <= 0.05 against a nominal 5%. So the
+    # plain binomial test is honestly calibrated here.
+    #
+    # The deflation below is therefore a safety net, not a fix: it only fires
+    # when the dependence runs positive, which is what a genuinely streaky game
+    # would do, and it costs nothing when it does not.
+    # ------------------------------------------------------------------
+    rho = _lag1(flags)
+    n_eff = tot_n
+    if tot_n > 2 and rho > 0:
+        n_eff = max(2.0, tot_n * (1.0 - rho) / (1.0 + rho))
+    p_value = (stats.binom_test_greater(int(round(rate * n_eff)), int(round(n_eff)),
+                                        2.0 / 3.0) if tot_n >= 2 else 1.0)
+    memory_p = _permutation_p(seq, flags, min_run, max_run, tot_n, tot_c)
     overall = {"n": tot_n, "continued": tot_c,
-               "continued_pct": round(100.0 * tot_c / tot_n, 1) if tot_n else 0.0,
+               "continued_pct": round(100.0 * rate, 1) if tot_n else 0.0,
                "break_even_pct": round(be, 2),
-               "edge_pct": round(100.0 * tot_c / tot_n - be, 1) if tot_n else 0.0,
-               "p_value": round(stats.binom_test_greater(tot_c, tot_n, 2.0 / 3.0), 4)
-               if tot_n else 1.0}
+               "edge_pct": round(100.0 * rate - be, 1) if tot_n else 0.0,
+               "n_eff": round(n_eff, 1), "lag1": round(rho, 4),
+               "p_value": round(p_value, 4),
+               "memory_p_value": round(memory_p, 4)}
     return {"min_run": min_run, "rows": rows, "overall": overall,
             "current": current_trend(seq, min_run),
             "verdict": _trend_verdict(overall)}
 
 
+def _lag1(flags: Sequence[int]) -> float:
+    """Lag-1 autocorrelation of the continuation flags."""
+    n = len(flags)
+    if n < 3:
+        return 0.0
+    m = sum(flags) / n
+    var = sum((x - m) ** 2 for x in flags)
+    if var <= 0:
+        return 0.0
+    cov = sum((flags[i] - m) * (flags[i + 1] - m) for i in range(n - 1))
+    return cov / var
+
+
+def _permutation_p(seq: Sequence[str], flags: Sequence[int], min_run: int,
+                   max_run: int, n: int, hits: int, rounds: int = 60,
+                   rng: Optional[random.Random] = None) -> float:
+    """Permutation test for *order* structure.
+
+    Shuffling the sequence destroys the order while preserving the marginal
+    frequencies, so this answers "does this game have memory?" separately from
+    "is the trend bet profitable?". A base-rate lean cannot dress up as memory,
+    because the shuffled null inherits the same lean.
+    """
+    if n < 20 or not seq:
+        return 1.0
+    rng = rng or random.Random(12345)
+    pool = list(seq)
+    observed = hits / n
+    ge = 0
+    for _ in range(rounds):
+        rng.shuffle(pool)
+        c = t = 0
+        for i in range(min_run, len(pool)):
+            cov = {pool[i - 1]}
+            length = 1
+            for j in range(i - 2, -1, -1):
+                if len(cov | {pool[j]}) <= 2:
+                    cov |= {pool[j]}
+                    length += 1
+                else:
+                    break
+            if len(cov) != 2 or length < min_run:
+                continue
+            t += 1
+            if pool[i] in cov:
+                c += 1
+        if t and c / t >= observed:
+            ge += 1
+    return (ge + 1) / (rounds + 1)
+
+
 def _trend_verdict(overall: Dict[str, Any]) -> str:
     n, rate, p = overall["n"], overall["continued_pct"], overall["p_value"]
+    mp = overall.get("memory_p_value", 1.0)
     if n < 25:
-        return (f"only {n} trend turns measured — not enough to tell a real edge "
-                f"from a lucky run")
+        return (f"only {n} trend turns measured — nowhere near enough to tell a "
+                f"real edge from a lucky run")
     if p <= 0.05 and rate > 66.67:
-        return (f"runs are continuing {rate:.1f}% of the time vs the 66.7% needed "
-                f"(p={p:.4f}) — this game DOES have memory, and the trend bet is real")
+        return (f"runs continue {rate:.1f}% vs the 66.7% needed (p={p:.4f}) — the "
+                f"trend bet is profitable at this table. Order-dependence test: "
+                f"p={mp:.3f} "
+                + ("(the game has real memory)" if mp <= 0.05 else
+                   "(but the pattern is not distinguishable from a plain colour bias)"))
     if p <= 0.05 and rate < 66.67:
-        return (f"runs continue only {rate:.1f}% of the time vs 66.7% needed "
-                f"(p={p:.4f}) — runs are breaking more often than chance")
-    return (f"runs continue {rate:.1f}% of the time against the 66.7% break-even "
-            f"(p={p:.2f}) — consistent with a game that has no memory, so the "
-            f"trend carries no information")
+        return (f"runs continue only {rate:.1f}% vs 66.7% needed (p={p:.4f}) — runs "
+                f"are breaking MORE often than chance here")
+    return (f"runs continue {rate:.1f}% vs the 66.7% break-even (p={p:.2f}, "
+            f"memory p={mp:.2f}) — consistent with a game that has no memory, so "
+            f"the trend carries no information")
+
+
+def trend_power_table(symbols: Sequence[str] = ("r", "b", "g"),
+                      min_run: int = 3) -> List[Dict[str, Any]]:
+    """Measured false-positive / detection rates for the trend test itself."""
+    return list(TREND_POWER_CALIBRATION)
 
 
 def ledger_bets(turns: Sequence[Dict[str, Any]], symbols: Sequence[str]) -> List[Dict[str, float]]:

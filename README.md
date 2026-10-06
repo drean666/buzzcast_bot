@@ -10,9 +10,14 @@ when it lands; everything learns. The bankroll is tracked to the last coin.
 Rebuilt from scratch in October 2026 from the original v1 design notes. Pure
 standard library — no pip install, no internet, no build step.
 
+**New here? Read [QUICKSTART.md](QUICKSTART.md)** — setup, how to play, and how
+long you need to record before results mean anything.
+
 ```
-python3 run.py            # then open http://127.0.0.1:8077
-python3 tests.py          # 31 tests, ~5 seconds
+START.bat                 Windows: double-click this
+./start.sh                macOS / Linux
+python3 run.py            any platform: then open http://127.0.0.1:8077
+python3 tests.py          40 tests, ~10 seconds
 python3 console.py sim biased bot 500
 ```
 
@@ -271,13 +276,13 @@ not a proven bias, and far too little data to bet on.
 
 ## Notes
 
-- Requires Python 3.8+. Nothing else.
+- Requires Python 3.8+. Nothing else. `START.bat` (Windows) or `start.sh` launches it.
 - Being stdlib-only keeps the original PyInstaller `.exe` route open if you
   ever want a double-clickable Windows build.
 - `data.json` and `data.backup.json` are gitignored — your real session stays
   on your machine. If the file is ever corrupted, the loader self-heals from
   the backup, and the model rebuilds from your turns.
-- `python3 tests.py` runs in a few seconds and is worth running after any
+- `python3 tests.py` runs in about ten seconds and is worth running after any
   change to `brain.py`: most of the suite exists to prove the bot *cannot*
   cheat, and if a change makes the fair-game test fail you have built a liar
   rather than a predictor.

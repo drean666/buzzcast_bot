@@ -20,13 +20,13 @@ Endpoints
 """
 from __future__ import annotations
 
-import csv
 import io
 import json
 import os
 import sys
 import threading
 import traceback
+import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
@@ -48,6 +48,49 @@ MIME = {".html": "text/html; charset=utf-8",
         ".json": "application/json; charset=utf-8",
         ".ico": "image/x-icon",
         ".png": "image/png"}
+
+
+class Server(ThreadingHTTPServer):
+    """HTTP server that can never silently share a port.
+
+    ``allow_reuse_address`` means opposite things on the two platforms:
+
+    * Unix: "let me rebind a port still in TIME_WAIT" — which is what allows a
+      quick restart, so we want it.
+    * Windows: "let me bind a port another process already owns" — the
+      equivalent of SO_REUSEPORT on Unix. Leaving it on there means buzzcast
+      can appear to start on a port that belongs to something else, and the
+      browser then talks to the wrong program.
+
+    So it is enabled on Unix and disabled on Windows, and port availability is
+    decided by actually attempting the bind rather than by probing.
+    """
+    daemon_threads = True
+    allow_reuse_address = (os.name != "nt")
+
+
+def bind_server(host: str, preferred: int,
+                tries: int = 12) -> "tuple[Server, int]":
+    """Bind to the first available port at or after ``preferred``.
+
+    The bind attempt IS the test. An earlier version probed with a throwaway
+    socket that set SO_REUSEADDR — which works on Unix but on Windows makes the
+    probe succeed even on a port someone else is using, so it happily reported
+    busy ports as free.
+    """
+    last: Optional[Exception] = None
+    for offset in range(tries):
+        port = preferred + offset
+        try:
+            httpd = Server((host, port), Handler)
+        except OSError as exc:
+            last = exc
+            continue
+        if offset:
+            print(f"port {preferred} was busy -> using {port} instead")
+        return httpd, port
+    raise SystemExit(f"ports {preferred}-{preferred + tries - 1} are all busy "
+                     f"({last}); close something or pass --port")
 
 
 class App:
@@ -374,16 +417,20 @@ def _version() -> str:
 
 
 def serve(host: Optional[str] = None, port: Optional[int] = None,
-          settings: Optional[Settings] = None, path: Optional[str] = None) -> None:
+          settings: Optional[Settings] = None, path: Optional[str] = None,
+          open_browser: bool = False) -> None:
     global APP
     s = settings or Settings.load()
     APP = App(s, path=path)
     host = host or str(s.g("ui", "host", default="0.0.0.0"))
     port = int(port or s.g("ui", "port", default=8077))
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    httpd.daemon_threads = True
-    print(f"buzzcast {_version()}  ->  http://{host}:{port}/")
+    httpd, port = bind_server(host, port)
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    url = f"http://{shown}:{port}/"
+    print(f"buzzcast {_version()}  ->  {url}")
     print(f"data file: {APP.engine.path}")
+    if open_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
