@@ -19,6 +19,7 @@ START.bat                 Windows: double-click this
 python3 run.py            any platform: then open http://127.0.0.1:8077
 python3 tests.py          40 tests, ~10 seconds
 python3 console.py sim biased bot 500
+python3 analyze.py        # the truth about YOUR recorded results
 ```
 
 ---

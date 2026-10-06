@@ -87,6 +87,107 @@ M_STRONG = {"r": {"r": 0.58, "b": 0.21, "g": 0.21},
             "g": {"r": 0.30, "b": 0.30, "g": 0.40}}
 
 
+# ---------------------------------------------------------------- analyzer
+@test
+def test_analyzer_reads_a_live_session():
+    """analyze.py must find results where they actually live.
+
+    A live session keeps its results inside the turns; warm_start only holds an
+    optional seed. Reading only warm_start made the report announce "no results
+    yet" on a session with 420 played turns.
+    """
+    import analyze
+    e, _ = fresh()
+    src = simulate.make_source("markov_strong", e.symbols, seed=77)
+    for _ in range(60):
+        e.place_bet({"r": 100, "b": 100, "g": 0}, follow="mine")
+        e.resolve(src.next())
+    e.flush()
+    data = analyze.load_any(e.path)
+    assert len(data["results"]) == 60, len(data["results"])
+    assert len(data["turns"]) == 60
+    text = analyze.report(e.path)
+    assert "60 recorded results" in text
+    assert "No results in there yet" not in text
+
+
+@test
+def test_analyzer_agrees_across_file_formats():
+    """A ledger, an exported turns CSV and a results CSV must analyse the same."""
+    import analyze
+    import tempfile
+    e, _ = fresh()
+    src = simulate.make_source("biased", e.symbols, seed=5)
+    for i in range(80):
+        if i % 3 == 0:
+            e.pass_turn()
+        else:
+            e.place_bet({"r": 60, "b": 60, "g": 0}, follow="mine")
+        e.resolve(src.next())
+    e.flush()
+    d = tempfile.mkdtemp()
+    tp = os.path.join(d, "turns.csv")
+    rp = os.path.join(d, "results.csv")
+    with open(tp, "w", encoding="utf-8") as fh:
+        fh.write(e.export_csv())
+    with open(rp, "w", encoding="utf-8") as fh:
+        fh.write(e.export_results_csv())
+
+    a = analyze.load_any(e.path)
+    b = analyze.load_any(tp)
+    c = analyze.load_any(rp)
+    assert a["results"] == b["results"] == c["results"], "CSVs disagree with the ledger"
+    # the exported turns file must still know which bets covered two colours
+    pa = analyze.play_stats(a["turns"], e.symbols)
+    pb = analyze.play_stats(b["turns"], e.symbols)
+    assert pa and pb
+    assert pa["shared"] == pb["shared"] > 0, (pa["shared"], pb["shared"])
+    assert abs(pa["pnl"] - pb["pnl"]) < 1e-6
+    assert abs(pa["staked"] - pb["staked"]) < 1e-6
+
+
+@test
+def test_analyzer_verdicts_match_the_known_truth():
+    """Test the RATE of false alarms, not one hand-picked sequence.
+
+    A 5% test is supposed to misfire on roughly one game in twenty - asking a
+    single fixed seed to come back non-significant is cherry-picking, and the
+    first version of this test did exactly that before a fair seed duly came
+    back at p = 0.029.
+    """
+    s = Settings.load()
+    # the invariant on a memoryless game: the continuation rate is 2/3
+    rng = random.Random(11)
+    fair = [rng.choice(["r", "b", "g"]) for _ in range(3000)]
+    o = simulate.trend_report(fair, s.symbols, min_run=3)["overall"]
+    assert abs(o["continued_pct"] - 66.67) < 2.0, o["continued_pct"]
+
+    # and false alarms stay rare across independent games
+    alarms = 0
+    for seed in range(16):
+        r2 = random.Random(900 + seed)
+        seq = [r2.choice(["r", "b", "g"]) for _ in range(1200)]
+        if simulate.trend_report(seq, s.symbols, min_run=3)["overall"]["p_value"] <= 0.05:
+            alarms += 1
+    assert alarms <= 4, f"{alarms}/16 fair games flagged - the test is over-eager"
+
+    # a strongly streaky game must be caught
+    strong = markov_stream(2000, M_STRONG, seed=4)
+    rep2 = simulate.trend_report(strong, s.symbols, min_run=3)
+    assert rep2["overall"]["p_value"] <= 0.05
+    assert rep2["overall"]["continued_pct"] > 66.67
+    assert "memory" in rep2["verdict"]
+
+
+@test
+def test_turns_needed_is_sane():
+    import analyze
+    assert analyze.turns_needed(0.67) > 100000      # impossible to prove
+    assert analyze.turns_needed(0.71) > analyze.turns_needed(0.76)
+    assert 100 < analyze.turns_needed(0.76) < 400
+    assert 500 < analyze.turns_needed(0.71) < 1000
+
+
 # ------------------------------------------------------------------ statistics
 @test
 def test_stats_sanity():

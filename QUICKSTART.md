@@ -52,21 +52,125 @@ put on a colour (e.g. `150`). That makes the preset button match how you play.
 
 ---
 
-## Part 4 — Play. Four clicks, forever.
+## Part 4 — Playing and recording
 
-| step | what to do |
+### Set up your screen once
+
+Put the buzzcast window **beside** your game window so both are visible at the
+same time. One hand stays on the keyboard. That's the whole physical setup —
+if you have to alt-tab to record, you'll stop recording.
+
+### The rhythm: two keystrokes per turn
+
+| what you want | press |
 |---|---|
-| **1** | Look at the bot's read — optional, you can ignore it |
-| **2** | Type stakes in the R / B / G boxes, or click the **150 R + 150 B** preset |
-| **3** | Click **Lock in the bet** |
-| **4** | When the real result happens, click **R**, **B** or **G** |
+| put on your usual bet | <code>2</code> (preset) then <code>Enter</code> |
+| put on the same bet as last turn | <code>space</code> |
+| sit the turn out | <code>p</code> |
+| **record the result** | <code>R</code> / <code>B</code> / <code>G</code> |
+| cancel a bet you just placed | <code>Esc</code> |
 
-Then repeat.
+**The important one is R / B / G.** When a round resolves you just tap the key
+for what came up. No clicking, no aiming, no typing.
 
-- Clicked the wrong thing? **cancel this bet** — nothing was staked yet.
-- Already entered a result? **History** tab → **Undo**, or **fix** on any row.
-- **Follow the bot** stakes what the bot would, which is **nothing** when it says
-  pass. Safe to press and find out.
+So a normal turn is:
+
+```
+round resolves  ->  tap B          (recorded, model learns)
+next round      ->  space          (same bet again)
+round resolves  ->  tap R          (recorded)
+...repeat
+```
+
+Two keystrokes. The badge at the top of the screen always tells you which phase
+you're in, so you always know what a key press will do.
+
+Number keys <code>1</code>–<code>6</code> are the presets in order, including
+**PASS** at <code>1</code> and your split bets at <code>2</code>/<code>3</code>/<code>4</code>.
+
+### The recording rules that make your data worth having
+
+Most of the value here is in *what* you record, not how fast.
+
+**1. Record every round — including the ones you sit out.**
+This is the big one. Press <code>p</code>, then still press R/B/G when the
+result lands. A result you didn't bet on is still information, and it costs you
+nothing. If you only record the turns you bet, you've recorded *your mood*
+rather than the game, and no amount of analysis can undo that.
+
+**2. Record immediately, in the moment.**
+Not at the end of the session from memory. Five minutes later you'll be unsure
+whether that run was four reds or five, and a wrong result is worse than a
+missing one — it corrupts every number downstream.
+
+**3. Record what happened, not what you expected.**
+The model is only as good as the honesty of the record.
+
+**4. Keep the stake the same.**
+Turn-to-turn comparison needs a constant. If you change your stake, start a new
+session so the old numbers stay comparable.
+
+**5. One table per session.**
+If you switch games, sites or machines, start a new session (**+ session**).
+Different game, different memory — mixing them hides both.
+
+> **Want to answer "does this game have memory?" before risking anything?**
+> Just record. Press <code>p</code> then R/B/G, over and over. You get the full
+> trend verdict with none of your money at risk. That is a perfectly sensible
+> way to spend your first 300 rounds.
+
+### How long does this actually take?
+
+One round is one keystroke. The clock that matters is your game's round timer:
+
+| round length | 300 rounds is about |
+|---|---|
+| 30 seconds | 2.5 hours |
+| 1 minute | 5 hours |
+| 2 minutes | 10 hours |
+
+Split across sessions — the ledger accumulates, so nothing is lost between
+sittings.
+
+### Reading the top of the screen
+
+- **capital figure** — your bankroll, updating live
+- **phase badge** — `place your bet` or `result pending`; this tells you what
+  your keys will do
+- **tier badge** on the bot's read — `commit` / `provisional` / `pass`
+
+You do not have to look at the bot's prediction at all. It records its own view
+every single turn whether or not you follow it, so the comparison is waiting for
+you later.
+
+## Part 4b — After a few hundred turns, analyse it
+
+Once you've recorded a decent number of results, run this in the project folder:
+
+```powershell
+python analyze.py
+```
+
+It reads your own data and answers three things, in plain words:
+
+1. **Are any colours coming up too often?**
+2. **Does your trend bet actually work here?** (do two-colour runs continue
+   more than the 66.7% it needs to break even)
+3. **How much more data until that answer is trustworthy?**
+
+It also tells you what your **actual betting** did — staked, profit, turnover,
+deepest dip — and how many of your bets covered two colours.
+
+To analyse an exported file instead (or send it to someone):
+
+```powershell
+python analyze.py results.csv
+python analyze.py turns.csv
+```
+
+> If it ever looks significant, remember a 5% test misfires about **one game in
+> twenty** by design. That's why the report shows you how many rows were
+> examined and what the corrected bar is.
 
 ---
 

@@ -8,7 +8,7 @@ const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const S = { state: null, config: null, ui: {
-  stakes: { r: 0, b: 0, g: 0 }, follow: 'mine', tab: 'overview',
+  stakes: { r: 0, b: 0, g: 0 }, follow: 'mine', lastBet: null, tab: 'overview',
   sim: { source: 'fair', policy: 'bot', turns: 600, seed: 1 },
   auto: { source: 'biased', turns: 60, follow: 'bot' },
   busy: false,
@@ -380,6 +380,45 @@ function renderPreview() {
 }
 
 /* -------------------------------------------------------------- actions */
+/* Record a result immediately, the same as clicking the R/B/G button. */
+async function recordResult(sym) {
+  await act(async () => {
+    await api('/api/resolve', { result: sym });
+    await refresh();
+    const t = S.state.recent_turns[0];
+    if (t) toast(`settled ${nameOf(t.result)} — ${money(t.pnl)}`);
+  });
+}
+
+/* Apply a preset by index, exactly as clicking it does. */
+function applyPreset(i) {
+  const p = (S.state.presets || [])[i];
+  if (!p) return;
+  st_symbols().forEach(s => S.ui.stakes[s] = p.stakes[s] || 0);
+  renderStakes(); renderPreview();
+}
+
+/* One keystroke to put the previous bet on again - the fastest way to play
+   a consistent strategy, which is what the trend bet is. */
+async function lockBet(followOverride) {
+  const follow = followOverride || S.ui.follow;
+  await act(async () => {
+    const snap = Object.assign({}, S.ui.stakes);
+    const d = await api('/api/bet', { stakes: snap, follow });
+    S.ui.lastBet = { stakes: snap, follow };
+    S.state = d.state; S.state.pending = d.pending;
+    const full = await api('/api/state'); S.state = full;
+    render(); toast('bet locked in');
+  });
+}
+
+async function repeatLastBet() {
+  if (!S.ui.lastBet) { toast('no previous bet to repeat yet'); return; }
+  S.ui.stakes = Object.assign({}, S.ui.lastBet.stakes);
+  S.ui.follow = S.ui.lastBet.follow;
+  await lockBet();
+}
+
 async function act(fn, okMsg) {
   if (S.ui.busy) return;
   S.ui.busy = true;
@@ -395,6 +434,46 @@ async function refresh(include) {
   render();
 }
 
+function wireKeys() {
+  document.addEventListener('keydown', (ev) => {
+    const el = document.activeElement || {};
+    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || '');
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+    const k = (ev.key || '').toLowerCase();
+
+    if (typing) {
+      // Enter inside a stake box locks the bet in; that is the natural ending
+      if (ev.key === 'Enter' && $('#panel-bet') && !$('#panel-bet').classList.contains('hidden')) {
+        el.blur(); lockBet(); ev.preventDefault();
+      }
+      return;
+    }
+    if (S.ui.busy) return;
+
+    const awaitingResult = S.state && S.state.phase === 'await_result';
+
+    // --- the one that matters: one key records the real result
+    if (awaitingResult) {
+      if ('rbg'.includes(k) && k.length === 1) { recordResult(k); ev.preventDefault(); return; }
+      if (k === 'escape') {
+        act(async () => { await api('/api/cancel', {}); await refresh(); }, 'bet cancelled');
+        ev.preventDefault(); return;
+      }
+      return;
+    }
+
+    // --- choosing and placing a bet
+    if (k >= '1' && k <= '9') { applyPreset(Number(k) - 1); ev.preventDefault(); return; }
+    if (ev.key === 'Enter') { lockBet(); ev.preventDefault(); return; }
+    if (k === 'p') {
+      act(async () => { await api('/api/pass', {}); await refresh(); },
+          'passed — the result still teaches the model');
+      ev.preventDefault(); return;
+    }
+    if (k === ' ' || k === 'a') { repeatLastBet(); ev.preventDefault(); return; }
+  });
+}
+
 function wire() {
   $$('#tabs .tab').forEach(t => t.onclick = () => {
     $$('#tabs .tab').forEach(x => x.classList.toggle('on', x === t));
@@ -404,8 +483,12 @@ function wire() {
   });
 
   $('#btn-refresh').onclick = () => act(refresh);
+  const rep = $('#btn-repeat');
+  if (rep) rep.onclick = () => repeatLastBet();
   $('#btn-bet').onclick = () => act(async () => {
-    const d = await api('/api/bet', { stakes: S.ui.stakes, follow: S.ui.follow });
+    const snap = Object.assign({}, S.ui.stakes);
+    const d = await api('/api/bet', { stakes: snap, follow: S.ui.follow });
+    S.ui.lastBet = { stakes: snap, follow: S.ui.follow };
     S.state = d.state; S.state.pending = d.pending;
     const full = await api('/api/state'); S.state = full; render();
   }, 'bet locked in — enter the real result when it lands');
@@ -676,7 +759,7 @@ function renderConfig() {
 }
 
 /* ---------------------------------------------------------------- boot */
-refresh().then(() => { populateSimSelects(); wire(); }).catch(e => {
+refresh().then(() => { populateSimSelects(); wire(); wireKeys(); }).catch(e => {
   document.body.insertAdjacentHTML('afterbegin',
     `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
 });
