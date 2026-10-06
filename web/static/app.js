@@ -9,6 +9,7 @@ const esc = (s) => String(s == null ? '' : s)
 
 const S = { state: null, config: null, ui: {
   stakes: { r: 0, b: 0, g: 0 }, follow: 'mine', lastBet: null, tab: 'overview',
+  recordOnly: true, setupDone: false,
   sim: { source: 'fair', policy: 'bot', turns: 600, seed: 1 },
   auto: { source: 'biased', turns: 60, follow: 'bot' },
   busy: false,
@@ -338,9 +339,20 @@ function setMode(m) {
 
 function tapColour(sym) {
   if (!S.state || S.ui.busy) return;
-  if (S.state.phase === 'await_result') { recordResult(sym); return; }   // record
+  // In record-only mode a tile means exactly one thing, whatever phase the
+  // round is in. That is the whole point of the mode: no way to stake by
+  // accident while you are still collecting evidence.
+  if (S.ui.recordOnly || S.state.phase === 'await_result') { recordResult(sym); return; }
   S.ui.stakes[sym] = (S.ui.stakes[sym] || 0) > 0 ? 0 : defaultStake();   // toggle
   renderTable();
+}
+
+function setRecordOnly(on) {
+  S.ui.recordOnly = !!on;
+  try { localStorage.setItem('buzzcast.recordOnly', on ? '1' : '0'); } catch (e) {}
+  renderTable();
+  toast(on ? 'record only — tap the colour that came up, nothing is staked'
+           : 'staking on — tap a colour before the round to put your usual on it');
 }
 
 function nudgeColour(sym, delta) {
@@ -457,7 +469,7 @@ function renderTable() {
   const pend = st.pending || {};
 
   /* --- the two-number setup card, only while nothing has been played --- */
-  const fresh = !c.turns || !!S.ui.forceSetup;
+  const fresh = (!c.turns && !S.ui.setupDone) || !!S.ui.forceSetup;
   $('#tv-setup').classList.toggle('hidden', !fresh);
   const note = $('#tv-setup-note');
   if (note) note.innerHTML = c.turns
@@ -481,9 +493,13 @@ function renderTable() {
     : `bot reads <b style="color:${colourOf(top)}">${esc(nameOf(top))}</b> ` +
       `${Math.round(pr.confidence || 0)}%, then passes on purpose`;
   $('#tv-bot').innerHTML = line;
-  $('#tv-hint').innerHTML = res
-    ? `<b style="color:var(--acc)">▼ tap the colour that came up</b>`
-    : `tap a colour to stake your usual &middot; tap it again to take it off`;
+  if (S.ui.recordOnly) {
+    $('#tv-hint').innerHTML = `<b style="color:var(--acc)">▼ tap the colour that came up</b>`;
+  } else {
+    $('#tv-hint').innerHTML = res
+      ? `<b style="color:var(--acc)">▼ tap the colour that came up</b>`
+      : `tap a colour to stake your usual &middot; tap it again to take it off`;
+  }
 
   /* --- the three tiles --- */
   const total = st_symbols().reduce((a, s) => a + (S.ui.stakes[s] || 0), 0);
@@ -493,7 +509,17 @@ function renderTable() {
     const mined = (pend.played_bet || {})[sym] || 0;
     const pay = (st.payouts && st.payouts[sym]) || 3;
     const style = `--c:${col};--cs:${soft(col, .16)}`;
+    const pend_has_this = (pend.played_bet || {})[sym] > 0;
 
+    if (S.ui.recordOnly) {
+      const r = runOf(sym);
+      return `<div class="tv-tile armed${pend_has_this ? ' on' : ''}" style="${style}" data-rec="${sym}">
+          <span class="tv-tapme">record</span>
+          <span class="tv-name">${esc(nameOf(sym))}</span>
+          <span class="tv-pay ${mined > 0 ? 'pos' : 'mut'}">${mined > 0 ? '+' + Math.round(mined * pay - (pend.stake_total || 0)) : 'record'}</span>
+          <span class="tv-sub">${r >= 2 ? 'on a run of ' + r : 'tap when it lands'}</span>
+        </div>`;
+    }
     if (res) {
       /* after the round: this tile RECORDS. Show what the round is worth. */
       const net = Math.round(mined * pay - (pend.stake_total || 0));
@@ -525,9 +551,17 @@ function renderTable() {
       </div>`;
   }).join('');
 
+  const fr = $('#tv-firstrun');
+  if (fr) fr.classList.toggle('hidden', (c.turns || 0) > 0);
+
   /* --- action row, one big button each --- */
   const minS = c.min_stake || 1;
-  if (res) {
+  if (S.ui.recordOnly) {
+    $('#tv-actions').innerHTML = `
+      <button id="tv-record-toggle" class="ghost">Recording only — nothing is staked
+        <span class="tiny dim">(press T to start staking)</span></button>
+      <button id="tv-undo" class="ghost">Undo the last recorded turn</button>`;
+  } else if (res) {
     $('#tv-actions').innerHTML = `
       <button id="tv-cancel" class="ghost">Cancel this bet <span class="tiny dim">(esc — costs nothing)</span></button>
       <button id="tv-undo" class="ghost">Undo the last recorded turn</button>`;
@@ -560,6 +594,8 @@ function renderTable() {
       nudgeColour(sym, Number(d));
     };
   });
+  const rt = $('#tv-record-toggle');
+  if (rt) rt.onclick = () => setRecordOnly(false);
   const lock = $('#tv-lock');
   if (lock) lock.onclick = () => lockBet();
   const pass = $('#tv-pass');
@@ -600,6 +636,7 @@ function wireTable() {
     await refresh();
     $('#tv-setup').dataset.seeded = '';
     S.ui.forceSetup = false;
+    S.ui.setupDone = true;   // do not ask again until they ask to change it
     toast('you are set up — tap a colour to place your first bet');
   });
 }
@@ -694,6 +731,10 @@ function renderPreview() {
 /* Record a result immediately, the same as clicking the R/B/G button. */
 async function recordResult(sym) {
   await act(async () => {
+    // If nothing is on the table, sit the turn out first - so recording is ONE
+    // action for the user. Two requests, but the engine still refuses to
+    // resolve twice, which is what stops a double-tap logging a result twice.
+    if (S.state && S.state.phase !== 'await_result') await api('/api/pass', {});
     await api('/api/resolve', { result: sym });
     await refresh();
     const t = S.state.recent_turns[0];
@@ -763,9 +804,13 @@ function wireKeys() {
 
     const awaitingResult = S.state && S.state.phase === 'await_result';
 
-    // --- the one that matters: one key records the real result
+    // --- THE key: one tap records the real result, in any phase.
+    // Recording no longer requires passing first, so this is the whole loop.
+    if ('rbg'.includes(k) && k.length === 1) { recordResult(k); ev.preventDefault(); return; }
+
+    if (k === 't') { setRecordOnly(!S.ui.recordOnly); ev.preventDefault(); return; }
+
     if (awaitingResult) {
-      if ('rbg'.includes(k) && k.length === 1) { recordResult(k); ev.preventDefault(); return; }
       if (k === 'escape') {
         act(async () => { await api('/api/cancel', {}); await refresh(); }, 'bet cancelled');
         ev.preventDefault(); return;
@@ -773,7 +818,11 @@ function wireKeys() {
       return;
     }
 
-    // --- choosing and placing a bet
+    // --- choosing and placing a bet (only when staking is switched on)
+    if (S.ui.recordOnly) {
+      if (k === 'u') { act(async () => { await api('/api/undo', {}); await refresh(); }, 'last turn undone'); ev.preventDefault(); }
+      return;
+    }
     if (k >= '1' && k <= '9') { applyPreset(Number(k) - 1); ev.preventDefault(); return; }
     if (ev.key === 'Enter') { lockBet(); ev.preventDefault(); return; }
     if (k === 'p') {
@@ -1075,6 +1124,10 @@ api('/api/config').then(d => { S.config = d.config; }).catch(() => {})
   .then(() => {
     let m = 'table';
     try { m = localStorage.getItem(MODE_KEY) || 'table'; } catch (e) {}
+    try {
+      const ro = localStorage.getItem('buzzcast.recordOnly');
+      S.ui.recordOnly = ro === null ? true : ro === '1';   // recording-only is the default
+    } catch (e) { S.ui.recordOnly = true; }
     setMode(m);
   }).catch(e => {
   document.body.insertAdjacentHTML('afterbegin',

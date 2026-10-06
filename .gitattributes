@@ -1,0 +1,17 @@
+# Line endings, pinned per file.
+
+# start.sh is the launcher for the OTHER laptop. It must keep LF endings: a
+# CRLF shell script dies on Linux or macOS with "$'\r': command not found",
+# which looks like a missing-file error and wastes an evening. A plain Windows
+# checkout would otherwise convert it, and the file is then broken the moment
+# it is copied anywhere else.
+start.sh text eol=lf
+
+# START.bat is Windows-only; CRLF is what cmd.exe wants.
+START.bat text eol=crlf
+
+# Never let git touch these.
+*.zip binary
+*.png binary
+*.jpg binary
+*.ico binary

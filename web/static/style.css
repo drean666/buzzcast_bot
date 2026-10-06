@@ -223,3 +223,14 @@ body.table-mode #table-view { display: block; }
 .tv-track { display: flex; gap: 3px; margin-top: 4px; }
 .tv-track i { width: 22px; height: 4px; border-radius: 2px; background: #232b38; display: block; }
 .tv-track i.on { background: var(--acc); }
+
+.tv-firstrun {
+  margin-top: 14px; padding: 14px 16px; border-radius: 14px;
+  border: 1px solid rgba(124,140,255,.35);
+  background: linear-gradient(90deg, rgba(124,140,255,.10), transparent 70%);
+  font-size: 13px; line-height: 1.55;
+}
+.tv-firstrun code {
+  background: #0b0f16; border: 1px solid var(--line); border-radius: 5px;
+  padding: 1px 5px; font-size: 12px;
+}

@@ -134,7 +134,24 @@ Put the buzzcast window **beside** your game window so both are visible at the
 same time. One hand stays on the keyboard. That's the whole physical setup —
 if you have to alt-tab to record, you'll stop recording.
 
-### The rhythm: two keystrokes per turn
+### The rhythm: ONE tap per turn
+
+For your first turns the screen is in **recording only** mode, and a tap on a
+colour tile means exactly one thing: *that colour just came up*. Nothing is
+staked. The mode is on by default precisely so there is no way to bet by
+accident while you are still collecting evidence.
+
+```
+the round ends  ->  tap the colour that came up
+the round ends  ->  tap the colour that came up
+...that is the entire job
+```
+
+When you decide you want to start staking for real, press **T** (or click the
+"Recording only" button). The tiles then change meaning: before a round they
+stake your usual amount, after a round they record. Press T again to go back.
+
+### The keyboard rhythm
 
 | what you want | press |
 |---|---|

@@ -1269,6 +1269,62 @@ def test_analyzer_reads_a_csv_excel_has_touched():
 
 
 @test
+def test_recording_a_result_without_a_bet_is_one_action():
+    """The first two hundred turns are recording-only, so this is THE loop.
+
+    The screen sends pass-then-resolve as a single tap. What must hold:
+      * one tap records exactly one turn, with no money moved;
+      * the model learns from it;
+      * a second resolve with nothing pending is still REFUSED, because that
+        refusal is the only thing stopping a double-tap from silently logging
+        the same result twice and corrupting the record the whole project
+        exists to collect.
+
+    The engine deliberately did NOT get an auto-pass to save the keystroke -
+    that would have removed the refusal. The convenience lives in the caller.
+    """
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "c.json"))
+    e = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+    e.new_session("recordonly", starting=1000)
+    capital0 = e.capital
+
+    # --- what one tap on a tile does
+    e.plan()
+    e.pass_turn()
+    turn = e.resolve("r")
+    assert turn["result"] == "r"
+    assert sum(turn["played_bet"].values()) == 0, "recording must not stake"
+    assert turn["pnl"] == 0.0, turn["pnl"]
+    assert e.capital == capital0, "the bankroll must not move"
+    assert e.brain.n_obs == 1, "the model must still learn"
+    assert e.state()["phase"] == "await_bet"
+
+    # --- a bare resolve is still refused (double-tap protection)
+    for _ in range(3):
+        try:
+            e.resolve("r")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a second resolve must be refused")
+    assert e.state()["capital"]["turns"] == 1, "nothing may be logged twice"
+    assert e.brain.n_obs == 1
+
+    # --- and a real bet still settles for real money afterwards
+    e.plan()
+    e.place_bet({"r": 120, "b": 120, "g": 0}, follow="mine")
+    t = e.resolve("b")
+    assert sum(t["played_bet"].values()) == 240
+    assert e.capital == capital0 + 120
+    assert e.brain.n_obs == 2
+
+
+@test
 def test_table_view_is_actually_served():
     """The game screen must be in the files the server hands the browser.
 

@@ -283,6 +283,12 @@ class GameEngine:
     def resolve(self, symbol: str) -> Dict[str, Any]:
         pend = self.session.get("pending")
         if not pend:
+            # Deliberately still an error. Letting a bare resolve sit the turn
+            # out by itself read nicely - recording became one action - but it
+            # also meant a double-tap logged the same result TWICE, silently
+            # corrupting the record. That invariant is worth more than the
+            # saved keystroke, so the convenience lives in the caller: the game
+            # screen passes the turn first when it has to, as a single action.
             raise ValueError("no bet is locked in")
         if symbol not in self.symbols:
             raise ValueError(f"result must be one of {self.symbols}")
