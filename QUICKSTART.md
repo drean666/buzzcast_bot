@@ -295,6 +295,9 @@ python analyze.py turns.csv
 
 ---
 
+> **Recording while you play, and when to start betting: see
+> [RECORDING_GUIDE.md](RECORDING_GUIDE.md) - one page, no jargon.**
+
 ## Part 6 — Let it record for you (optional)
 
 If you can run the game in an **Android emulator on your laptop** (BlueStacks,
@@ -357,9 +360,16 @@ python capture.py --screen 300,200,1100,800 --once --report   (X,Y,W,H of the po
 python capture.py --adb --watch --interval 15
 ```
 
-Leave it going. Every new result is recorded into buzzcast **as a pass** — the
-bankroll never moves, because this tool exists to gather evidence, not to bet.
-It keeps a log in `capture_log.txt` and remembers where it was in
+**The first thing it does is a free gift: the board already holds up to 50 real
+results, and it records all of them.** They are genuine results you had not
+recorded, so you start with up to fifty turns of evidence instead of zero.
+
+(If you already recorded those rounds by hand, add `--no-initial` or they would
+land in the ledger twice.)
+
+After that it records every new result as it appears. Every one goes in **as a
+pass** — the bankroll never moves, because this tool exists to gather evidence,
+not to bet. It keeps a log in `capture_log.txt` and remembers where it was in
 `capture_config.json`, so you can stop and restart it freely.
 
 Press **Ctrl+C** to stop, then look at the app: the turns are all there.

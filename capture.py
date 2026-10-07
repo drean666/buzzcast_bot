@@ -628,6 +628,32 @@ def api(base: str, path: str, body=None, timeout: float = 10.0):
         return json.loads(fh.read().decode("utf-8"))
 
 
+def drain(base: str, pending: list, dry_run: bool = False) -> list:
+    """Feed as much of the waiting queue as the app will take.
+
+    Returns what is still waiting, in order. This is the whole of the
+    data-safety rule: results are only ever removed from the queue once the app
+    has actually accepted them, so an app that is down, restarted or refusing
+    cannot cause a result to be skipped. Before this, results were marked as
+    seen the moment they were spotted, and an app that was down for a minute
+    lost them permanently - the board had slid on by the time it came back.
+    """
+    if not pending:
+        return []
+    fed = feed(base, pending, dry_run)
+    if dry_run:
+        return list(pending)          # a rehearsal consumes nothing
+    return list(pending[fed:])
+
+
+def app_alive(base: str) -> bool:
+    try:
+        api(base, "/api/health", timeout=4)
+        return True
+    except Exception:                                              # noqa: BLE001
+        return False
+
+
 def feed(base: str, results: list, dry_run: bool = False) -> int:
     """Push results into the app as recorded-only turns (no stake, ever)."""
     done = 0
@@ -834,6 +860,9 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=15.0,
                     help="seconds between checks when watching (default 15)")
     ap.add_argument("--once", action="store_true", help="one pass, then stop")
+    ap.add_argument("--no-initial", action="store_true",
+                    help="do NOT record the results already on the board when you "
+                         "start (use if you recorded them by hand already)")
     ap.add_argument("--dry-run", action="store_true",
                     help="say what would be recorded, but change nothing")
     ap.add_argument("--base", default=DEFAULT_BASE, help="buzzcast address")
@@ -874,44 +903,67 @@ def main() -> int:
         print("   read %d of %d correctly" % (right, len(seq_true)))
         return 0 if right == len(seq_true) else 1
 
-    if args.file:
-        img = load_image(args.file)
-    elif args.screen:
+    rect = None
+    if args.screen:
         try:
             rect = [int(v) for v in args.screen.split(",")]
             assert len(rect) == 4
         except Exception:                                          # noqa: BLE001
             print("--screen wants X,Y,W,H - four numbers separated by commas")
             return 2
-        img = grab_screen(rect)
-    elif args.adb:
-        adb = adb_executable(args.adb_path)
-        if not adb:
-            print("cannot find adb. Start your emulator, enable ADB in its settings,\n"
-                  "or pass --adb-path 'C:\\path\\to\\adb.exe'.")
+
+    def grab():
+        """One screenshot from whichever source was asked for."""
+        if args.file:
+            return load_image(args.file)
+        if args.screen:
+            return grab_screen(rect)
+        if args.adb:
+            adb = adb_executable(args.adb_path)
+            if not adb:
+                raise RuntimeError(
+                    "cannot find adb. Start your emulator and enable ADB in its "
+                    "settings, or pass --adb-path 'C:\\path\\to\\adb.exe'")
+            return grab_adb(adb, args.serial)
+        raise RuntimeError("pick a source: --demo, --file, --screen or --adb")
+
+    try:
+        img = grab()
+    except Exception as exc:                                       # noqa: BLE001
+        # A first look that fails is ordinary, not exceptional: the emulator may
+        # still be booting, the popup may not be open yet, or the file may not
+        # be written. It used to end in a raw traceback. When watching, the loop
+        # retries anyway, so carry on and let it.
+        if not args.watch:
+            print("cannot read the screen: %s" % exc)
+            print("nothing has been changed. Fix that and run it again with --report "
+                  "to check what it sees.")
             return 2
-        try:
-            img = grab_adb(adb, args.serial)
-        except Exception as exc:                                   # noqa: BLE001
-            print("adb could not take a screenshot:", exc)
-            return 2
+        print("cannot read the screen yet (%s) - watching, and will keep trying" % exc)
+        img = None
+
+    if img is None:
+        geom = None
     else:
-        ap.print_help()
-        print("\npick a source: --demo, --file, --screen or --adb")
-        return 2
+        geom = detect_grid(img)
 
     geom = detect_grid(img)
     if not geom:
-        print("could not find the Trend board in that image.")
-        print("Are the popup open and the whole board visible? If it is visible and")
-        print("this still fails, send me a PNG screenshot and I will tune the reader.")
-        return 1
-    seq = read_grid(img, geom)
+        if not args.watch:
+            print("could not find the Trend board in that image.")
+            print("Are the popup open and the whole board visible? If it is visible and")
+            print("this still fails, send me a PNG screenshot and I will tune the reader.")
+            return 1
+        print("no board visible yet - watching, and will keep trying")
+        seq = []
+    else:
+        seq = read_grid(img, geom)
     known = [c for c in seq if c]
-    print("%s -> %d cells, %d rows x %d columns" %
-          (img, geom["cells"], len(geom["rows"]), len(geom["cols"])))
-    print(describe(img, seq, geom))
-    if not known:
+    if geom and img is not None:
+        print("%s -> %d cells, %d rows x %d columns" %
+              (img, geom["cells"], len(geom["rows"]), len(geom["cols"])))
+        print(describe(img, seq, geom))
+    if not known and not args.watch:
         print("nothing recognised - wrong window, or the popup is not open")
         return 1
 
@@ -920,11 +972,27 @@ def main() -> int:
             print("\nCompare the letters above with the board on your screen.")
             print("They should match exactly, left to right, top to bottom.")
             print("If they do, you are ready:  python capture.py --adb --watch")
+        # Say this out loud. "--once" reads like "record one round" and someone
+        # will leave it running for an hour and wonder where the data is.
+        print("\nlook-only pass: NOTHING was recorded and nothing was changed.")
+        print("to record, run without --once/--report:  python capture.py --adb --watch")
         return 0
 
     cfg = load_config()
     prev = cfg.get("last_seen") or []
-    results, note = advance(prev, seq) if prev else ([], None)
+    pending0 = list(cfg.get("pending") or [])
+    initial = not prev and bool(known)
+    if initial and not args.no_initial:
+        # On the very first look the whole board is history you did not watch
+        # happen, but it is still fifty REAL results, in order, on the screen.
+        # Recording them gives you a fifty-turn head start on the evidence and
+        # costs nothing. (Use --no-initial if you have already recorded those
+        # turns by hand, or the same results would land in the ledger twice.)
+        results, note = [c for c in seq if c], (
+            "first look: recording the whole board - up to 50 real results you had "
+            "not recorded yet. Use --no-initial next time if you already had them.")
+    else:
+        results, note = advance(prev, seq) if prev else ([], None)
     if note:
         print("  note: " + note)
     if prev and not results and not note:
@@ -933,19 +1001,43 @@ def main() -> int:
         print("  %d new result(s): %s" % (len(results), " ".join(r.upper() for r in results)))
 
     if not args.watch:
-        feed(args.base, results, args.dry_run)
+        queue = pending0 + list(results)
+        if queue:
+            cfg["pending"] = drain(args.base, queue, args.dry_run)
         cfg["last_seen"] = [c for c in seq]
         save_config(cfg)
         return 0
 
     print("\nwatching every %.0f seconds. Ctrl+C to stop." % args.interval)
+    if not app_alive(args.base):
+        print()
+        print("  *** the buzzcast app is NOT running at %s" % args.base)
+        print("  *** start it first (double-click START.bat, or run: python run.py)")
+        print("  *** without it there is nowhere to put the results. I will keep")
+        print("  *** watching and hold onto them - the board shows the last 50, so")
+        print("  *** anything within that window is still recorded once it appears.")
     if not prev:
+        queue = list(pending0)
+        if progress := [c for c in seq if c]:
+            if args.no_initial:
+                print("first look taken as the starting point: %d results on the board, "
+                      "none recorded (--no-initial)" % len(progress))
+            else:
+                print("the board already holds %d results - recording all of them now, "
+                      "because they are real results you had not recorded" % len(progress))
+                queue += progress
+        n = feed(args.base, queue, args.dry_run) if queue else 0
+        cfg["pending"] = list(queue) if args.dry_run else queue[n:]
         cfg["last_seen"] = [c for c in seq]
         save_config(cfg)
-        print("first look recorded as the starting point - nothing logged yet, because")
-        print("the board was already there before I started. From now on, new results.")
+        if queue and n < len(queue):
+            print("  %d are waiting for the app - they are kept safe, in order, and"
+                  % (len(queue) - n))
+            print("  will be recorded as soon as it is running.")
     total = 0
     misses = 0
+    quiet = 0
+    n = 0
     while True:
         try:
             time.sleep(args.interval)
@@ -963,18 +1055,48 @@ def main() -> int:
             seq = read_grid(img, geom)
             cfg = load_config()
             prev = cfg.get("last_seen") or []
-            results, note = advance(prev, seq)
+            # Two separate things, and conflating them loses data:
+            #   last_seen - where the BOARD was, which is how new results are
+            #               spotted. It has to keep up with the board.
+            #   pending   - results spotted but not yet in the ledger, in order.
+            #               It has to survive the app being down.
+            # Marking results as seen the moment they were spotted lost them for
+            # good: by the time the app came back the board had slid, and the
+            # missed results could no longer be lined up with anything.
+            pending = list(cfg.get("pending") or [])
+
+            if not prev:
+                fresh, note = [c for c in seq if c], None
+            else:
+                fresh, note = advance(prev, seq)
             if note:
                 print("  " + note)
                 log("alignment: " + note)
-            elif results:
-                n = feed(args.base, results, args.dry_run)
-                total += n
-                log("recorded %d: %s" % (n, " ".join(results)))
-                print("  recorded %d (this run: %d)" % (n, total))
-            else:
-                print("  ...")
+            if fresh:
+                pending += fresh
+                log("spotted %d: %s" % (len(fresh), " ".join(fresh)))
+
             cfg["last_seen"] = [c for c in seq]
+            if pending:
+                before = len(pending)
+                pending = drain(args.base, pending, args.dry_run)
+                n = before - len(pending)
+                total += n
+                if n:
+                    log("recorded %d" % n)
+                    print("  recorded %d (this run: %d, %d still waiting)"
+                          % (n, total, len(pending)))
+                if len(pending) > 200:
+                    print("  %d results are waiting for the app - is it running?"
+                          % len(pending))
+            else:
+                # quiet by default: a poll every few seconds for hours would
+                # otherwise fill the window with dots and bury anything real
+                quiet += 1
+                if quiet >= 20:
+                    quiet = 0
+                    print("  ... still watching (this run: %d recorded)" % total)
+            cfg["pending"] = pending
             save_config(cfg)
         except KeyboardInterrupt:
             print("\nstopped. %d result(s) recorded this run. Log: %s" % (total, LOG_PATH))

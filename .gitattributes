@@ -7,8 +7,10 @@
 # it is copied anywhere else.
 start.sh text eol=lf
 
-# START.bat is Windows-only; CRLF is what cmd.exe wants.
-START.bat text eol=crlf
+# The .bat launchers are Windows-only; CRLF is what cmd.exe wants. A LF
+# .bat still *runs*, but "start \"buzzcast app\" cmd /k ..." and multi-line
+# blocks misbehave, so pin every one of them.
+*.bat text eol=crlf
 
 # Never let git touch these.
 *.zip binary

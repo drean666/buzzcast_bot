@@ -1554,6 +1554,195 @@ def test_the_reader_knows_which_results_are_new():
 
 
 @test
+def test_a_whole_watched_game_records_exactly_once_each():
+    """The unattended path, end to end, in process.
+
+    A game plays 58 rounds while the watcher looks at the board every few
+    seconds. The board holds the last 50 and slides, so the same results are
+    seen again and again. What must be true at the end:
+
+      * every result is in the ledger exactly once, in the right order;
+      * nothing is recorded twice, which is the failure mode that would quietly
+        corrupt the record;
+      * results that arrived in a burst between two looks are all caught.
+
+    The live version of this - a real watcher process against a real server -
+    was run by hand and matched the true history exactly. This is the same
+    shape, fast enough to run every time.
+    """
+    import os
+    import tempfile
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    true = ["r", "b", "g", "b", "r", "g", "g", "b", "r", "r",
+            "b", "b", "g", "r", "b", "g", "r", "g", "b", "g",
+            "g", "r", "b", "b", "g", "r", "r", "b", "g", "b",
+            "r", "g", "b", "r", "g", "b", "b", "r", "g", "r",
+            "b", "r", "g", "g", "b", "r", "b", "g", "r", "b",
+            "g", "r", "b", "g", "g", "r", "b", "b"]
+
+    def board_at(total):
+        """What is on screen when the game has played `total` rounds."""
+        visible = true[:total][-50:]
+        return capture.make_demo_board(visible + [None] * (50 - len(visible)))
+
+    ledger = []
+    seen_board = None
+    # the game is already at 50 when the watcher starts, then plays on in bursts
+    for total in (50, 52, 53, 55, 58):
+        img = board_at(total)
+        geom = capture.detect_grid(img)
+        assert geom, "board not found at %d results" % total
+        seq = capture.read_grid(img, geom)
+        assert len(seq) == min(50, total), (total, len(seq))
+        if seen_board is None:
+            ledger += [c for c in seq if c]          # the initial board
+        else:
+            fresh, note = capture.advance(seen_board, seq)
+            assert note is None, note
+            ledger += fresh
+        seen_board = seq
+
+    assert ledger == true, "ledger\n%s\ntrue\n%s" % ("".join(ledger), "".join(true))
+
+
+@test
+def test_the_watcher_never_loses_a_result_when_the_app_is_down():
+    """Results stay queued until the app actually accepts them.
+
+    The app being down, restarted or refusing is ordinary over a long unattended
+    run. The first version treated a result as "seen" the moment it appeared on
+    the board, so a single minute of downtime lost those results permanently -
+    by the time the app came back the board had slid on, and there was nothing
+    left to line the missed results up against. Measured live: 50 results lost.
+
+    The rule now: a result is only removed from the queue once the app has taken
+    it. Verified live too - the app was down while the board advanced twice, and
+    when it came back all 55 results were recorded in order, none missing.
+    """
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    accepted = []
+
+    def fake_api_ok(base, path, body=None, timeout=10.0):
+        if path == "/api/state":
+            return {"phase": "await_bet"}
+        if path == "/api/pass":
+            return {"ok": True}
+        if path == "/api/resolve":
+            accepted.append(body["result"])
+            return {"ok": True, "turn": {"n": len(accepted), "pnl": 0.0}}
+        return {"ok": True}
+
+    def fake_api_down(base, path, body=None, timeout=10.0):
+        raise OSError("connection refused")
+
+    real_api = capture.api
+
+    pending = ["r", "b", "g", "r"]
+    try:
+        # the app is down: nothing is accepted, nothing is dropped
+        capture.api = fake_api_down
+        left = capture.drain("http://x", pending)
+        assert left == pending, (left, pending)
+        assert capture.drain("http://x", []) == []
+
+        # the app comes back: everything queued is recorded, in order, once
+        capture.api = fake_api_ok
+        left = capture.drain("http://x", left)
+        assert left == [], left
+        assert accepted == ["r", "b", "g", "r"], accepted
+
+        # and a second drain with nothing waiting records nothing at all
+        accepted.clear()
+        assert capture.drain("http://x", []) == []
+        assert accepted == []
+
+        # an app that dies half way through keeps exactly the remainder
+        accepted.clear()
+        calls = {"n": 0}
+
+        def flaky(base, path, body=None, timeout=10.0):
+            if path == "/api/resolve":
+                calls["n"] += 1
+                if calls["n"] > 2:
+                    raise OSError("died mid-drain")
+                accepted.append(body["result"])
+                return {"ok": True, "turn": {"n": calls["n"], "pnl": 0.0}}
+            if path == "/api/state":
+                return {"phase": "await_result"}
+            return {"ok": True}
+
+        capture.api = flaky
+        left = capture.drain("http://x", ["r", "b", "g", "b", "r"])
+        assert accepted == ["r", "b"], accepted
+        assert left == ["g", "b", "r"], left
+
+        # dry run must not clear the queue either
+        capture.api = fake_api_ok
+        left = capture.drain("http://x", ["r", "b"], dry_run=True)
+        assert left == ["r", "b"], left
+    finally:
+        capture.api = real_api
+
+
+@test
+def test_the_operating_guide_and_launcher_stay_in_step():
+    """The instructions and the tool must not drift apart.
+
+    RECORDING_GUIDE.md and WATCH.bat are what the user actually follows. Every
+    command they contain has to be one capture.py really supports, and the
+    launcher has to start both halves - the app AND the watcher. A guide that
+    tells someone to run a flag that does not exist is worse than no guide.
+    """
+    import os
+    import re
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    guide = open(os.path.join(root, "RECORDING_GUIDE.md"), encoding="utf-8").read()
+    bat = open(os.path.join(root, "WATCH.bat"), encoding="utf-8").read()
+    src = open(os.path.join(root, "capture.py"), encoding="utf-8").read()
+
+    # every --flag the guide mentions must exist in capture.py
+    flags = set(re.findall(r"--[a-z][a-z0-9-]+", guide))
+    for flag in sorted(flags):
+        assert ('"%s"' % flag) in src or ("'%s'" % flag) in src, \
+            "the guide tells the user to run %s, which capture.py does not have" % flag
+
+    # the launcher starts the app, the watcher, and mentions the adb override
+    assert "run.py" in bat, "WATCH.bat does not start the app"
+    assert "capture.py" in bat, "WATCH.bat does not start the watcher"
+    assert "--watch" in bat
+    assert "adb" in bat, "WATCH.bat says nothing about the adb path"
+
+    # every .bat we ship must have CRLF endings: cmd.exe mishandles \n in
+    # multi-line blocks and in "start ... cmd /k", and the damage is invisible
+    # until someone double-clicks it on Windows
+    for name in sorted(n for n in os.listdir(root) if n.endswith(".bat")):
+        raw = open(os.path.join(root, name), "rb").read()
+        assert b"\r\n" in raw, "%s has no CRLF ending at all" % name
+        bare = raw.replace(b"\r\n", b"").count(b"\n")
+        assert bare == 0, (
+            "%s has %d bare LF line(s) - cmd.exe can misread a batch file with "
+            "mixed endings" % (name, bare))
+
+    # the guide must name the one operational thing that matters
+    assert "Trend popup" in guide
+    assert "pass" in guide.lower(), "the guide never says the watcher only passes"
+
+    # and the stages it quotes must be the stages the screen actually shows
+    app = open(os.path.join(root, "web", "static", "app.js"), encoding="utf-8").read()
+    for stage in ("warming up", "earning its trust", "close, not proven",
+                  "the bot has a proven edge"):
+        assert stage in app, "the screen no longer has a stage called %r" % stage
+        assert stage in guide, "the guide no longer explains the stage %r" % stage
+
+
+@test
 def test_the_result_reader_never_stakes():
     """It records; it does not bet. The bankroll must not move.
 
@@ -1705,6 +1894,18 @@ def main() -> int:
     safe_console()
     only = [a for a in sys.argv[1:] if not a.startswith("-")]
     tests = [t for t in RESULTS if not only or any(o in t.__name__ for o in only)]
+    # Say which version is being tested, first, in one line.
+    #
+    # This is not decoration. A zip that never landed, or landed in the wrong
+    # folder, leaves an OLD tree in place - and the old tree passes its own old
+    # tests perfectly happily. "64/64 passed, all good" reads exactly like
+    # success while being two versions out of date. With the version printed,
+    # the stale folder names itself.
+    try:
+        from engine import __version__ as _v
+    except Exception:                                              # noqa: BLE001
+        _v = "unknown"
+    print(f"buzzcast {_v} - {len(tests)} tests")
     passed, failed = 0, []
     for fn in tests:
         try:
