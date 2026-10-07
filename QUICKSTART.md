@@ -342,10 +342,11 @@ It draws a pretend board, reads it back and reports. If that says
    Advanced → Android Debug Bridge; LDPlayer and MuMu have the same switch).
 2. Run:
    ```
-   python capture.py --adb --once --report
+   python capture.py --check
    ```
-   If it shows the board, you are done. If it says it cannot find `adb`, pass
-   `--adb-path "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"`.
+   It finds the emulator, takes a picture, reads the board and shows you the
+   letters. If it says something is missing, it names that one thing and how to
+   fix it. `--check` records nothing, so run it as often as you like.
 
 **Fallback — capture a rectangle of the desktop:**
 

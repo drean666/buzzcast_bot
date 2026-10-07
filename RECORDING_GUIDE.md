@@ -65,24 +65,37 @@ back to recording by hand — either works.
 **2. Turn on ADB in the emulator.** BlueStacks: Settings → Advanced → Android
 Debug Bridge → on.
 
-**3. Check Python can see it.** In the project folder:
+**3. Run the check.** In the project folder:
 
 ```powershell
-python capture.py --adb --once --report
+python capture.py --check
 ```
 
-It should print the board as letters. **Compare them with your screen**, left to
-right, top to bottom. If they match, you are ready. (`--once --report` is a
-look-only check: it records nothing at all, so you can run it any time.)
+That is the only command you need here. It looks for your emulator, asks it for
+a picture, finds the board, reads it, and tells you whether the app is running.
+It stops at the first thing that is missing and says which one it is:
 
-If it says it cannot find adb, tell it where it is:
+```
+buzzcast capture check
 
-```powershell
-python capture.py --adb --once --report --adb-path "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
+  adb ................. C:\Program Files\BlueStacks_nxt\HD-Adb.exe
+  emulator ............ 127.0.0.1:5555
+  screenshot .......... Img(1080x1920, 32bpp)
+  board ............... 50 cells, 5 rows x 10 columns, 0 unread
+                        R B G B R G G B R R
+                        ...
+  buzzcast app ........ running at http://127.0.0.1:8077
+
+  READY. Open the Trend popup, then double-click WATCH.bat.
 ```
 
-If that works, put the same path into `WATCH.bat` (there is a note at the bottom
-of the file showing exactly where).
+**Compare those letters with the board on your screen** - left to right, top to
+bottom. If they match, you are ready. If they do not, stop and say so rather
+than recording wrong results.
+
+`--check` records nothing, so you can run it as often as you like. It also
+finds the emulator's own adb by itself, so you normally do not need to know
+where it is.
 
 ---
 
@@ -154,7 +167,9 @@ formal test can.
 
 | what you see | what it means |
 |---|---|
-| `cannot find adb` | The emulator is not running, or ADB is off, or adb is not on PATH. See step 3 above. |
+| `adb ... NOT FOUND` | No emulator installed yet, or ADB is off. Run `python capture.py --check` - it says which. |
+| `emulator ... NOT RUNNING` | adb is there, the emulator is not. Start it and let it finish booting. |
+| the letters do not match | Run `python capture.py --check` and compare. Do not let it record. |
 | `no board visible yet` | The Trend popup is closed. Open it. |
 | `the board does not line up` | The popup was closed and reopened, or the game restarted. The watcher refuses to guess and waits for two looks that agree. |
 | `the buzzcast app is NOT running` | The app window got closed. Reopen `START.bat`; the watcher holds the results and records them as soon as it is back. |

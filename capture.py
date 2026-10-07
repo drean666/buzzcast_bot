@@ -183,6 +183,15 @@ def _adb_decode(data: bytes) -> Img:
     whole screenshot costs milliseconds instead of seconds, which matters when
     polling for hours.
     """
+    # Some adb builds hand back a finished PNG instead of the raw frame, and
+    # BlueStacks' own HD-Adb.exe is one of them depending on the version. Check
+    # for that first: without it the PNG's first header field is read as a frame
+    # width and the answer is "unsupported screen format 218103808", which
+    # explains nothing to anybody. Same for BMP.
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return _png_decode(data)
+    if data[:2] == b"BM":
+        return _bmp_decode(data)
     if len(data) < 16:
         raise ValueError("screencap returned %d bytes - the device probably refused" % len(data))
     w, h, fmt = struct.unpack("<III", data[:12])
@@ -687,28 +696,98 @@ def feed(base: str, results: list, dry_run: bool = False) -> int:
 
 
 # ================================================================== capturing
-def adb_executable(explicit=None) -> "str | None":
+# Where the popular emulators keep the adb they ship with. Kept as path
+# COMPONENTS, not as ready-made strings: glob treats a backslash as an escape
+# character on anything that is not Windows, so a hard-coded "C:\\...\\adb.exe"
+# pattern silently matches nothing when it is tested anywhere else. Joined with
+# os.path.join it is correct on every platform, and can be tested everywhere.
+ADB_PATTERNS = [
+    ("Program Files", "BlueStacks*", "HD-Adb.exe"),
+    ("Program Files (x86)", "BlueStacks*", "HD-Adb.exe"),
+    ("BlueStacks*", "HD-Adb.exe"),
+    ("LDPlayer*", "adb.exe"),
+    ("LDPlayer*", "LDPlayer*", "adb.exe"),
+    ("Program Files", "Netease", "MuMu*", "shell", "adb.exe"),
+    ("Program Files*", "MuMu*", "shell", "adb.exe"),
+    ("Program Files*", "Nox", "bin", "adb.exe"),
+    ("Nox", "bin", "adb.exe"),
+    ("Program Files*", "Microvirt", "MEmu", "adb.exe"),
+    ("Program Files*", "Tencent", "GameLoop*", "adb.exe"),
+    ("AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"),
+]
+
+
+def adb_in(homes) -> list:
+    """Every adb executable living under these folders. Never raises.
+
+    Split out from find_adbs() so a test can point it at a made-up emulator
+    installation and see whether it would have been found. That test is the
+    only reason to trust the search on a machine that has no emulator on it.
+    """
+    import glob as _glob
+    found = []
+    for home in homes:
+        for parts in ADB_PATTERNS:
+            try:
+                for hit in _glob.glob(os.path.join(home, *parts)):
+                    if os.path.isfile(hit) and hit not in found:
+                        found.append(hit)
+            except Exception:                                      # noqa: BLE001
+                continue
+    return found
+
+
+def find_adbs(explicit=None) -> list:
+    """Every adb on this machine, best first. Never raises."""
     if explicit:
-        return explicit
+        return [explicit]
+    found = []
     for name in ("adb", "adb.exe"):
         try:
             subprocess.run([name, "version"], capture_output=True, timeout=10)
-            return name
+            found.append(name)
+            break
         except Exception:                                          # noqa: BLE001
             pass
-    # the usual places an emulator hides its own copy
-    guesses = [
-        r"C:\Program Files\BlueStacks_nxt\HD-Adb.exe",
-        r"C:\Program Files (x86)\BlueStacks_nxt\HD-Adb.exe",
-        r"C:\LDPlayer\LDPlayer9\adb.exe",
-        r"C:\LDPlayer\LDPlayer4\adb.exe",
-        r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
-        os.path.expanduser(r"~\AppData\Local\Android\Sdk\platform-tools\adb.exe"),
-    ]
-    for g in guesses:
-        if os.path.exists(g):
-            return g
-    return None
+    # Search every drive root, not just C:. People install emulators on D:.
+    homes = []
+    for drive in ("C", "D", "E", "F", "G"):
+        root = drive + ":\\"
+        if os.path.isdir(root):
+            homes.append(root)
+    homes.append(os.path.expanduser("~") + os.sep)
+    found += adb_in(homes)
+
+    # Newest emulator install first: with two versions installed, the one most
+    # recently touched is the one actually being used.
+    def rank(path):
+        try:
+            return -os.path.getmtime(path)
+        except OSError:
+            return 0
+    tail = sorted((f for f in found if os.path.isabs(f)), key=rank)
+    head = [f for f in found if not os.path.isabs(f)]
+    return head + tail
+
+
+def adb_executable(explicit=None) -> "str | None":
+    hits = find_adbs(explicit)
+    return hits[0] if hits else None
+
+
+def adb_devices(adb: str) -> list:
+    """The serials of the emulators adb can actually talk to."""
+    try:
+        out = subprocess.run([adb, "devices"], capture_output=True,
+                             timeout=30).stdout.decode("utf-8", "replace")
+    except Exception:                                              # noqa: BLE001
+        return []
+    devs = []
+    for line in out.splitlines()[1:]:
+        bits = line.split()
+        if len(bits) >= 2 and bits[1] == "device":
+            devs.append(bits[0])
+    return devs
 
 
 def grab_adb(adb: str, serial: "str | None" = None) -> Img:
@@ -841,6 +920,126 @@ def describe(img: Img, seq: list, geom: dict) -> str:
     return "\n".join(lines)
 
 
+def run_check(args) -> int:
+    """One command that says whether recording can work, and names what is missing.
+
+    The alternative is four separate failures discovered one at a time - no adb,
+    no emulator, no board on screen, no app - and from the outside they all look
+    identical: "it does not work". This walks the same chain the watcher walks,
+    in order, and stops at the first link that is broken.
+    """
+    print("buzzcast capture check")
+    print()
+    ready = True
+
+    # ---- where the picture comes from ------------------------------------
+    if args.file:
+        print("  picture ............. from %s" % args.file)
+        img, why = None, None
+        try:
+            img = load_image(args.file)
+        except Exception as exc:                                   # noqa: BLE001
+            why = str(exc)
+        if img is None:
+            print("                        CANNOT READ IT - %s" % why)
+            return 1
+        print("                        %s" % img)
+    else:
+        adbs = find_adbs(args.adb_path)
+        if not adbs:
+            print("  adb ................. NOT FOUND")
+            print()
+            print("  There is no emulator's adb on this machine, and none on PATH.")
+            print("  Looked on drives C: D: E: F: G: and in your home folder, in")
+            print("  the places BlueStacks, LDPlayer, MuMu, Nox, MEmu and GameLoop")
+            print("  install it.")
+            print()
+            print("  To fix it: install BlueStacks, then in it turn on")
+            print("      Settings > Advanced > Android Debug Bridge")
+            print("  and run this again.")
+            return 1
+        adb = adbs[0]
+        print("  adb ................. %s" % adb)
+        for extra in adbs[1:]:
+            print("                        also found: %s" % extra)
+
+        devs = adb_devices(adb)
+        if not devs and not args.serial:
+            # BlueStacks and friends sometimes need to be told where to listen.
+            # Trying the usual ports costs a second and saves a support round.
+            for port in (5555, 5565, 7555, 62001, 21503):
+                try:
+                    subprocess.run([adb, "connect", "127.0.0.1:%d" % port],
+                                   capture_output=True, timeout=15)
+                except Exception:                                  # noqa: BLE001
+                    pass
+            devs = adb_devices(adb)
+        if not devs:
+            print("  emulator ............ NOT RUNNING")
+            print()
+            print("  adb is here, but nothing is connected to it. Start the")
+            print("  emulator and let it finish booting - the game does not have")
+            print("  to be open yet - then run this again.")
+            return 1
+        serial = args.serial or devs[0]
+        print("  emulator ............ %s" % serial)
+        for extra in devs[1:]:
+            if extra != serial:
+                print("                        also running: %s" % extra)
+        try:
+            img = grab_adb(adb, serial)
+            print("  screenshot .......... %s" % img)
+        except Exception as exc:                                   # noqa: BLE001
+            print("  screenshot .......... FAILED - %s" % exc)
+            return 1
+
+    # ---- can the board be read out of it ---------------------------------
+    geom = detect_grid(img)
+    if not geom:
+        print("  board ............... NOT VISIBLE")
+        print()
+        print("  The picture arrived, but there is no Trend board in it.")
+        print("  Open the game's Trend popup and leave it open - that board is")
+        print("  the only thing this reads. Then run this again.")
+        return 1
+    seq = read_grid(img, geom)
+    known = [c for c in seq if c]
+    print("  board ............... %d cells, %d rows x %d columns, %d unread"
+          % (geom["cells"], len(geom["rows"]), len(geom["cols"]),
+             len(seq) - len(known)))
+    for i in range(0, len(seq), len(geom["cols"])):
+        print("                        %s" % " ".join(
+            (c or "?").upper() for c in seq[i:i + len(geom["cols"])]))
+    if not known:
+        print("  letters ............. none recognised - is the popup really open?")
+        return 1
+    if any(not c for c in seq):
+        ready = False
+        print("  letters ............. %d could not be read" % (len(seq) - len(known)))
+        print("                        the watcher waits for a clearer look rather")
+        print("                        than guessing, so this is safe - but the")
+        print("                        window may be covered or very small")
+
+    # ---- is there anywhere for the results to go -------------------------
+    if app_alive(args.base):
+        print("  buzzcast app ........ running at %s" % args.base)
+    else:
+        ready = False
+        print("  buzzcast app ........ NOT RUNNING at %s" % args.base)
+        print("                        results would be held safely, in order,")
+        print("                        until you start it (START.bat or WATCH.bat)")
+
+    # ---- verdict ---------------------------------------------------------
+    print()
+    if ready:
+        print("  READY. Open the Trend popup, then double-click WATCH.bat.")
+        print("  Compare the letters above with the board on your screen first -")
+        print("  if they differ, stop and say so rather than recording them.")
+        return 0
+    print("  NOT READY YET - fix what is marked above, then run this again.")
+    return 1
+
+
 def main() -> int:
     safe_console()
     ap = argparse.ArgumentParser(
@@ -867,7 +1066,12 @@ def main() -> int:
                     help="say what would be recorded, but change nothing")
     ap.add_argument("--base", default=DEFAULT_BASE, help="buzzcast address")
     ap.add_argument("--screens", action="store_true", help="list the screen size and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="check the whole recording chain and say what is missing")
     args = ap.parse_args()
+
+    if args.check:
+        return run_check(args)
 
     if args.screens:
         try:

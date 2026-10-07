@@ -1743,6 +1743,270 @@ def test_the_operating_guide_and_launcher_stay_in_step():
 
 
 @test
+def test_the_emulator_search_would_actually_find_an_emulator():
+    """The search has to be testable on a machine that has no emulator on it.
+
+    Written naively it was: the patterns were hard-coded "C:\\Program Files\\..."
+    strings, and glob treats a backslash as an ESCAPE character on anything that
+    is not Windows - so on the machine where the search is developed it matched
+    nothing at all, silently, and the only place it could ever be exercised was
+    the user's machine. That is the worst place to find out.
+
+    Kept as path components and joined with os.path.join, the same list is
+    correct on Windows and checkable everywhere else.
+    """
+    import os
+    import shutil
+    import tempfile
+    import capture
+
+    home = tempfile.mkdtemp(prefix="fake_emulator_")
+    try:
+        # the three shapes that are actually out there
+        wanted = {
+            os.path.join(home, "Program Files", "BlueStacks_nxt", "HD-Adb.exe"):
+                "BlueStacks 5",
+            os.path.join(home, "LDPlayer", "LDPlayer9", "adb.exe"):
+                "LDPlayer",
+            os.path.join(home, "Program Files", "Netease",
+                         "MuMuPlayer-12.0", "shell", "adb.exe"):
+                "MuMu",
+        }
+        for path in wanted:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").close()
+
+        found = capture.adb_in([home])
+        for path, label in wanted.items():
+            assert path in found, (
+                "%s ships adb at %s and the search did not find it" % (label, path))
+
+        # and it must not invent one where there is nothing
+        empty = tempfile.mkdtemp(prefix="no_emulator_")
+        try:
+            assert capture.adb_in([empty]) == [], \
+                "the search reported an adb in a folder that has none"
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@test
+def test_a_screenshot_is_understood_however_the_emulator_sends_it():
+    """Three wire formats, one board.
+
+    A real device answers `exec-out screencap` with a raw framebuffer - a short
+    header and then pixels. BlueStacks' own HD-Adb.exe answers with a finished
+    PNG depending on its version. Both are ordinary; being unable to read one of
+    them looks, from the user's side, exactly like the thing being broken.
+
+    The PNG case used to fail with "unsupported screen format 218103808", which
+    is the PNG's own IHDR length read as a frame width - a number that means
+    nothing to anyone and sent me looking in the wrong place.
+    """
+    import struct
+    import capture
+
+    board = capture.make_demo_board()
+    geom = capture.detect_grid(board)
+    assert geom, "the demo board no longer reads"
+    truth = capture.read_grid(board, geom)
+
+    # 1. as the raw RGBA frame a device sends (format 1)
+    rgba = bytearray()
+    for i in range(board.w * board.h):
+        o = i * board.bpp
+        rgba += bytes((board.px[o], board.px[o + 1], board.px[o + 2], 255))
+    raw = struct.pack("<III", board.w, board.h, 1) + bytes(rgba)
+    back = capture._adb_decode(raw)
+    assert (back.w, back.h) == (board.w, board.h)
+    g2 = capture.detect_grid(back)
+    assert g2 and capture.read_grid(back, g2) == truth, \
+        "the raw framebuffer does not decode to the same board"
+
+    # 2. as RGB_565, the format older devices send
+    px565 = bytearray()
+    for i in range(board.w * board.h):
+        o = i * board.bpp
+        r, g, b = board.px[o], board.px[o + 1], board.px[o + 2]
+        px565 += struct.pack("<H", ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3))
+    f565 = capture._adb_decode(struct.pack("<III", board.w, board.h, 4) + bytes(px565))
+    assert (f565.w, f565.h) == (board.w, board.h)
+
+    # 3. and as a finished PNG, which is what BlueStacks' adb may return
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="screencap_")
+    try:
+        path = os.path.join(tmp, "shot.png")
+        capture.save_png(board, path)
+        png_bytes = open(path, "rb").read()
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    png = capture._adb_decode(png_bytes)
+    assert (png.w, png.h) == (board.w, board.h)
+    g3 = capture.detect_grid(png)
+    assert g3 and capture.read_grid(png, g3) == truth, \
+        "a PNG from the device does not decode to the same board"
+
+
+@test
+def test_the_doctor_names_what_is_missing_and_does_not_crash():
+    """--check is the one command to run when nothing works.
+
+    Its whole job is to stop at the first broken link and say which one it is,
+    because "no adb", "emulator not started", "popup closed" and "app not
+    running" all look identical from the outside: it does not work.
+
+    The branches are driven directly, with the adb search replaced. The first
+    version of this test ran capture.py in a subprocess with PATH and HOME
+    pointed at empty folders, which is a trick that works on a machine with no
+    emulator on it - and nowhere else. The search also looks in
+    C:\\Program Files, which is exactly where a BlueStacks install lives, so on
+    the user's machine it found the real adb, reached the real emulator, got a
+    real 1600x900 screenshot back, and failed the "no adb anywhere" assertion
+    FOR BEING RIGHT.
+
+    A test that only passes on a machine that does not have the thing being
+    tested is worthless. Replacing the search in-process tests the branches on
+    every machine, including the one this is for.
+    """
+    import argparse
+    import contextlib
+    import io
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, root)
+    import capture
+
+    def args(**kw):
+        base = dict(file=None, adb_path=None, serial=None,
+                    base="http://127.0.0.1:65533")   # nothing listens on this
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def branch(patch_find, a):
+        """Run run_check with the adb search replaced, capturing what it says."""
+        real = capture.find_adbs
+        buf = io.StringIO()
+        try:
+            capture.find_adbs = patch_find
+            with contextlib.redirect_stdout(buf):
+                rc = capture.run_check(a)
+        finally:
+            capture.find_adbs = real
+        return rc, buf.getvalue()
+
+    # --- nothing to read from -------------------------------------------
+    rc, out = branch(lambda *a, **k: [], args())
+    assert rc == 1, "--check claimed to be ready with no adb at all"
+    assert "NOT FOUND" in out, out
+    assert "BlueStacks" in out, "it does not say how to fix it"
+    assert "Traceback" not in out, out
+
+    # --- adb found, but no emulator attached to it ------------------------
+    real_devs = capture.adb_devices
+    try:
+        capture.adb_devices = lambda adb: []
+        rc, out = branch(lambda *a, **k: [os.path.join(root, "capture.py")], args())
+    finally:
+        capture.adb_devices = real_devs
+    assert rc == 1, "--check called it ready with no emulator running"
+    assert "NOT RUNNING" in out, out
+    assert "nothing is connected to it" in out, out
+
+    # --- a picture arrives, but there is no board in it -------------------
+    tmp = tempfile.mkdtemp(prefix="doctor_")
+    try:
+        blank = os.path.join(tmp, "blank.png")
+        capture.save_png(capture.Img(320, 240, 3, bytes([70, 110, 160]) * (320 * 240)),
+                         blank)
+        rc, out = branch(lambda *a, **k: [], args(file=blank))
+        assert rc == 1, "--check called a blank picture ready"
+        assert "NOT VISIBLE" in out, out
+        assert "Trend popup" in out, "it does not say what to open"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- and a real board, through the command line as the user runs it ---
+    subprocess.run([sys.executable, "capture.py", "--demo"], cwd=root,
+                   capture_output=True, timeout=180)
+    proc = subprocess.run([sys.executable, "capture.py", "--check", "--file",
+                           "demo_board.png"], cwd=root,
+                          capture_output=True, timeout=120)
+    out2 = proc.stdout.decode("utf-8", "replace")
+    assert "50 cells, 5 rows x 10 columns, 0 unread" in out2, out2
+    assert "NOT RUNNING" in out2 or "running at" in out2, out2
+    assert "Traceback" not in out2, out2
+    # note: with --file, no adb is searched for at all - which is what makes
+    # this half safe to run on a machine that has an emulator installed
+
+
+@test
+def test_the_emulator_search_is_not_fooled_by_an_empty_path():
+    """Clearing PATH and HOME does NOT hide an emulator - and must not.
+
+    This is the condition that broke the previous test on the user's own
+    machine, reproduced on purpose. A real BlueStacks lives in
+    "C:\\Program Files\\BlueStacks_nxt", and finding it there without being told
+    is the entire point of the search; so a test that "hides adb" by emptying
+    PATH and HOME does not hide anything, it only fails on machines that happen
+    to have an emulator installed - which is every machine that matters.
+
+    Simulated with a folder named C:\\ (legal on anything that is not Windows).
+    On Windows this returns immediately: the drive roots are real there, so the
+    condition being tested is simply the default, and there is nothing to fake.
+    """
+    import os
+    import shutil
+    import sys
+    import tempfile
+    root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, root)
+    import capture
+
+    if os.name == "nt":
+        return
+
+    tmp = tempfile.mkdtemp(prefix="fake_drive_")
+    here = os.getcwd()
+    empty_home = os.path.join(tmp, "empty_home")
+    env_backup = {k: os.environ.get(k) for k in ("PATH", "HOME")}
+    try:
+        # a drive root that looks like a real one, with BlueStacks in it
+        adb = os.path.join(tmp, "C:\\", "Program Files", "BlueStacks_nxt",
+                           "HD-Adb.exe")
+        os.makedirs(os.path.dirname(adb), exist_ok=True)
+        open(adb, "wb").close()
+        os.makedirs(empty_home, exist_ok=True)
+
+        os.chdir(tmp)
+        os.environ["PATH"] = ""            # no adb on PATH
+        os.environ["HOME"] = empty_home    # and no adb in the home folder
+        found = capture.find_adbs()
+
+        wanted = [f for f in found if f.endswith(os.path.join("BlueStacks_nxt",
+                                                              "HD-Adb.exe"))]
+        assert wanted, (
+            "an emulator installed in the standard place was not found once PATH "
+            "and HOME were empty: %r" % found)
+    finally:
+        os.chdir(here)
+        for k, v in env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test
 def test_the_result_reader_never_stakes():
     """It records; it does not bet. The bankroll must not move.
 

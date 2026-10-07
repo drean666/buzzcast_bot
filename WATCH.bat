@@ -49,6 +49,20 @@ echo    Press Ctrl+C in THIS window to stop watching.
 echo    The app window keeps running; close it when you have finished.
 echo.
 
+REM --- a quick check first, so a broken setup is explained in one line -----
+REM     rather than as a loop that finds nothing, hour after hour
+%PY% capture.py --check
+if errorlevel 1 (
+  echo.
+  echo   ================================================================
+  echo    Something above is not ready yet. Fix that one thing, then
+  echo    double-click WATCH.bat again. Nothing has been changed.
+  echo   ================================================================
+  echo.
+  pause
+  exit /b 1
+)
+
 REM --adb is the emulator path. If adb is not on PATH, add:
 REM     --adb-path "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
 %PY% capture.py --adb --watch --interval 15
