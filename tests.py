@@ -1325,6 +1325,255 @@ def test_recording_a_result_without_a_bet_is_one_action():
 
 
 @test
+def test_no_control_is_wired_to_an_element_that_may_not_exist():
+    """A $('#x').onclick where #x is absent throws, and inside wire() that
+    exception aborts EVERY wiring step after it.
+
+    That is how the game screen became unreachable. #btn-copy-bot is only
+    rendered when the bot actually proposes a bet, so on every fresh session -
+    where the bot passes - the lookup returned null, the assignment threw, and
+    everything later in wire() never ran, including wireTable(). The result:
+    the "Table view" button did nothing at all, the page blamed the engine,
+    and the engine was fine. Reproduced in a DOM that returns null for any id
+    that is not really in index.html.
+
+    A dereference is safe only when the id is genuinely in index.html. Ids
+    app.js creates itself are conditional by nature, so reaching into one
+    without checking is a crash waiting for the right game state - the correct
+    form is `const el = $('#x'); if (el) el.onclick = ...`.
+
+    (Wire() and the boot sequence are ALSO individually guarded now, so one
+    mistake degrades one section instead of the whole interface. This test is
+    what stops the mistake being made in the first place.)
+    """
+    import os
+    import re
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    js = open(os.path.join(root, "web", "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "web", "static", "index.html"), encoding="utf-8").read()
+
+    static_ids = set(re.findall(r'id="([^"]+)"', html))
+    dynamic_ids = set(re.findall(r'id="([^"]+)"', js))
+    assert len(static_ids) > 50, "the markup parse found almost nothing - has it moved?"
+
+    derefs = re.findall(r"\$\('#([\w-]+)'\)\s*\.", js)
+    assert len(derefs) > 50, (
+        "only %d dereferences found; the pattern has probably drifted" % len(derefs))
+
+    unguarded = sorted({d for d in derefs if d not in static_ids})
+    assert not unguarded, (
+        "these are wired without checking they exist, so they crash when the "
+        "element is not rendered: " + ", ".join("#" + u for u in unguarded))
+
+    # the ids app.js creates for itself are the risky ones - list them so a
+    # future edit that reaches into one is obvious
+    assert "btn-copy-bot" not in derefs, (
+        "#btn-copy-bot is created conditionally and must be guarded")
+
+
+@test
+def test_the_boot_cannot_be_taken_down_by_one_bad_element():
+    """Wiring must degrade one section at a time, never all at once.
+
+    The previous test stops the known mistake. This one checks the safety net
+    is still there, because the safety net is what turns a future mistake into
+    "one panel didn't load" rather than "the button does nothing".
+    """
+    import os
+
+    root = os.path.dirname(os.path.abspath(__file__))
+    js = open(os.path.join(root, "web", "static", "app.js"), encoding="utf-8").read()
+
+    assert "WIRING.failed" in js, "the wiring failure registry is gone"
+    assert "function step" in js or "const step = " in js, \
+        "the per-step guard around the wiring calls is gone"
+    for section in ("simulation selects", "dashboard", "keyboard", "game screen"):
+        assert section in js, "wiring step %r is no longer guarded" % section
+
+
+@test
+def test_the_live_read_is_measured_against_reality():
+    """The strip shows "the bot's read, last 40 turns: X% right".
+
+    That number is the whole answer to "when should I expect predictions?", so
+    it has to be real: it must be the model's favourite compared with what
+    actually came up over a rolling window, and it must sit at chance on a game
+    with no pattern - otherwise it would tell the user to start betting when
+    there is nothing to bet on.
+    """
+    import tempfile
+    from engine.settings import Settings
+    from engine.game import GameEngine
+    from engine import simulate
+
+    def run(source, seed, turns):
+        tmp = tempfile.mkdtemp()
+        st = Settings.load(path=os.path.join(tmp, "c.json"))
+        g = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+        g.new_session("read", starting=1000)
+        src = simulate.make_source(source, g.symbols, seed=seed)
+        for _ in range(turns):
+            g.plan()
+            g.pass_turn()
+            g.resolve(src.next())
+        return g.state()["brain"]
+
+    b = run("markov_strong", 3, 300)
+    assert "read_hit_rate_pct" in b, "the strip has no read accuracy to show"
+    assert 0.0 <= b["read_hit_rate_pct"] <= 100.0
+    assert b["read_window"] == min(40, b["n_obs"]), b["read_window"]
+
+    # and it must agree with the raw record it summarises
+    tmp = tempfile.mkdtemp()
+    st = Settings.load(path=os.path.join(tmp, "c.json"))
+    g = GameEngine(st, path=os.path.join(tmp, "d.json"), autosave=False)
+    g.new_session("read2", starting=1000)
+    src = simulate.make_source("markov_strong", g.symbols, seed=3)
+    for _ in range(300):
+        g.plan()
+        g.pass_turn()
+        g.resolve(src.next())
+    w = 40
+    manual = 100.0 * sum(1 for a, c in zip(g.brain.oos_top[-w:], g.brain.oos_actual[-w:])
+                         if a == c) / w
+    approx(g.brain.stats_snapshot()["read_hit_rate_pct"], manual, 0.01)
+
+    # a game with no pattern must not look predictable
+    fair = run("fair", 0, 300)
+    assert fair["read_hit_rate_pct"] < 45.0, fair["read_hit_rate_pct"]
+
+
+@test
+def test_the_result_reader_classifies_the_games_colours():
+    """The three symbols, their decoys, and nothing else.
+
+    Thresholds are set from the real game. The decoys matter as much as the
+    symbols: the board sits on an orange panel, the crowns are gold, and the
+    characters have skin tones - all of which are saturated and would be
+    mistaken for a symbol by a naive "is it colourful" test.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    # the measured colours of the real game
+    assert capture.classify((222, 48, 42)) == "r"
+    assert capture.classify((26, 172, 108)) == "g"
+    assert capture.classify((32, 78, 220)) == "b"
+    assert capture.classify((165, 62, 51)) == "r"      # as photographed
+    assert capture.classify((17, 114, 78)) == "g"
+    assert capture.classify((12, 54, 184)) == "b"
+
+    # the decoys: the orange panel, gold crowns, skin, the light strips, black
+    for decoy in ((232, 148, 84), (250, 214, 70), (238, 206, 176),
+                  (247, 244, 238), (255, 255, 255), (12, 12, 14), (90, 90, 96)):
+        assert capture.classify(decoy) is None, decoy
+
+
+@test
+def test_the_result_reader_finds_and_reads_a_board():
+    """Draw a board with a known sequence, then read it back exactly.
+
+    This exercises the geometry - finding the five strips, splitting each into
+    ten cells, snapping onto the centres - and the PNG encoder and decoder
+    along the way, since the board is written out and loaded again.
+    """
+    import os
+    import tempfile
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    seq_true = ["r", "b", "g", "b", "r", "g", "g", "b", "r", "r",
+                "b", "b", "g", "r", "b", "g", "r", "g", "b", "g",
+                "g", "r", "b", "b", "g", "r", "r", "b", "g", "b",
+                "r", "g", "b", "r", "g", "b", "b", "r", "g", "r",
+                "b", "r", "g", "g", "b", "r", "b", "g", "r", "b"]
+    img = capture.make_demo_board(seq_true)
+    path = os.path.join(tempfile.mkdtemp(), "board.png")
+    capture.save_png(img, path)
+    img2 = capture.load_image(path)              # exercises the PNG decoder
+    geom = capture.detect_grid(img2)
+    assert geom, "the board was not found in an image of that board"
+    assert geom["cells"] == 50, geom["cells"]
+    assert len(geom["rows"]) == 5 and len(geom["cols"]) == 10
+    seq = capture.read_grid(img2, geom)
+    assert len(seq) == 50, len(seq)
+    right = sum(1 for a, b in zip(seq, seq_true) if a == b)
+    assert right == 50, "read %d of 50: %s vs %s" % (right, seq, seq_true)
+
+
+@test
+def test_the_reader_knows_which_results_are_new():
+    """The one piece of state that can silently corrupt the ledger.
+
+    Every look at the board has to work out which results are new. Getting this
+    wrong writes fiction into the record the whole project exists to collect, so
+    each case is pinned:
+
+      * nothing changed            -> nothing to record
+      * the board filled up        -> the tail
+      * the board slid by one/more -> the tail of that length
+      * an unrelated board         -> NOTHING, with an explanation. This is the
+        one that matters: closing and reopening the popup, or restarting the
+        game, produces a board that does not line up, and recording it would be
+        inventing results.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    base = ["r", "b", "g", "b", "r", "g", "g", "b", "r", "r"]
+
+    # unchanged
+    assert capture.advance(base, list(base)) == ([], None)
+
+    # filled up from the start: the old board is a prefix
+    grown = base + ["b", "b"]
+    assert capture.advance(base, grown) == (["b", "b"], None)
+
+    # slid by one
+    slid1 = base[1:] + ["b"]
+    res, note = capture.advance(base, slid1)
+    assert res == ["b"] and note is None, (res, note)
+
+    # slid by three
+    slid3 = base[3:] + ["b", "g", "r"]
+    res, note = capture.advance(base, slid3)
+    assert res == ["b", "g", "r"] and note is None, (res, note)
+
+    # unrelated board: must refuse, and say why
+    other = ["g", "g", "g", "r", "r", "r", "b", "b", "b", "g"]
+    res, note = capture.advance(base, other)
+    assert res == [], res
+    assert note and "does not line up" in note, note
+
+    # a repeated board is genuinely ambiguous: record the safe minimum, say so
+    rep = ["r", "b"] * 5
+    res, note = capture.advance(rep, rep[1:] + ["r"])
+    assert len(res) <= 1
+    assert note is None or "align" in note.lower(), note
+
+
+@test
+def test_the_result_reader_never_stakes():
+    """It records; it does not bet. The bankroll must not move.
+
+    capture.py exists to gather evidence unattended, so the one thing it must
+    never do is place a stake. Every turn it feeds the app is a pass.
+    """
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import capture
+
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "capture.py"), encoding="utf-8").read()
+    assert "/api/pass" in src, "it does not pass turns"
+    assert '"/api/bet"' not in src and "'/api/bet'" not in src, \
+        "capture.py places bets - it must only record"
+    assert "follow" not in src.split("def feed")[1][:400], \
+        "feed() mentions follow, which is a staking path"
+
+
+@test
 def test_table_view_is_actually_served():
     """The game screen must be in the files the server hands the browser.
 

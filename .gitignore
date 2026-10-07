@@ -28,3 +28,9 @@ simulations/*.json
 # Keep the shipped defaults / templates in git
 !config.json
 !archive/old_history.json
+
+# ---- capture tool ----
+demo_board.png
+capture_config.json
+capture_log.txt
+capture_shot.bmp

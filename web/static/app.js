@@ -306,6 +306,7 @@ function render() {
    ================================================================== */
 
 const MODE_KEY = 'buzzcast.view';
+const WIRING = { failed: [] };   // anything that failed to start, named
 
 function defaultStake() {
   const c = (S.config && S.config.capital) || {};
@@ -396,13 +397,16 @@ function readiness(st) {
   const paperP = Number(br.paper_roi_p_value || 1);
   const provisional = Number(br.provisional_steps || 0);
   const paperN = Number(br.paper_roi_n || 0);
+  const readPct = Number(br.read_hit_rate_pct || 0);
+  const readN = Number(br.read_window || 0);
+  const chancePct = Number(br.chance_pct || 33.33);
 
   if (nObs < warm) {
     return {
       stage: 1, name: 'warming up', cls: '',
       what: 'Record only. The bot cannot read anything yet.',
       why: `${nObs} of ${warm} results seen before it is allowed an opinion.`,
-      paper: null, track: [nObs / Math.max(warm, 1), 0, 0, 0],
+      paper: null, read: null, track: [nObs / Math.max(warm, 1), 0, 0, 0],
     };
   }
   if (pr.tier === 'commit') {
@@ -412,6 +416,7 @@ function readiness(st) {
       why: `its paper trade is ${pct(paper)} and statistically significant ` +
            `(p=${paperP < 0.001 ? '<0.001' : paperP.toFixed(3)}).`,
       paper: { v: paper, p: paperP, n: paperN },
+      read: { v: readPct, n: readN, chance: chancePct },
       track: [1, 1, 1, 1],
     };
   }
@@ -421,6 +426,7 @@ function readiness(st) {
       what: 'The bot is staking its own money at reduced size. Keep recording.',
       why: 'its paper trade is positive but has not cleared the significance bar.',
       paper: { v: paper, p: paperP, n: paperN },
+      read: { v: readPct, n: readN, chance: chancePct },
       track: [1, 1, 1, 0.5],
     };
   }
@@ -431,6 +437,7 @@ function readiness(st) {
          'first commits around turn 100-170, and by turn 500 if nothing has ' +
          'committed the game is probably fair.',
     paper: { v: paper, p: paperP, n: paperN },
+    read: { v: readPct, n: readN, chance: chancePct },
     track: [1, 0.35, 0, 0],
   };
 }
@@ -439,6 +446,15 @@ function renderReadiness(st) {
   const host = $('#tv-stage');
   if (!host) return;
   const r = readiness(st);
+  // Its read, measured against what actually came up. On a fair game this
+  // sits at chance forever, so watching it is how you find out whether there is
+  // anything to predict at all - before you risk a penny.
+  const read = r.read && r.read.n >= 10
+    ? `<div class="paper">bot's read, last ${r.read.n} turns
+         <b class="${r.read.v > r.read.chance + 3 ? 'pos' : 'mut'}">${r.read.v.toFixed(0)}%</b> right
+         <div class="tiny dim">chance is ${r.read.chance.toFixed(0)}%${r.read.v > r.read.chance + 3 ? ' — better than chance' : ' — no better than chance yet'}</div>
+       </div>`
+    : `<div class="paper tiny dim">the bot's read<br>starts at 15 results</div>`;
   const paper = r.paper && r.paper.n
     ? `<div class="paper">bot's paper trade
          <b class="${cls(r.paper.v)}">${pct(r.paper.v)}</b> over ${r.paper.n} turns
@@ -456,6 +472,7 @@ function renderReadiness(st) {
       <div class="what">${esc(r.what)}</div>
       <div class="why">${esc(r.why)}</div>
     </div>
+    ${read}
     ${paper}`;
 }
 
@@ -876,7 +893,13 @@ function wire() {
     renderStakes(); renderPreview();
     toast('staked both trend colours — enter the result when it lands');
   };
-  $('#btn-copy-bot').onclick = () => {
+  // This button is only rendered when the bot actually proposes a bet, so it is
+  // absent on every new session. Without the guard the assignment below threw,
+  // and because it sits inside wire() the exception aborted every wiring step
+  // after it - including wireTable() - so the "Table view" button silently did
+  // nothing while the page blamed the engine.
+  const copyBot = $('#btn-copy-bot');
+  if (copyBot) copyBot.onclick = () => {
     const bb = S.state.prediction.bet;
     Object.keys(bb.stakes).forEach(s => S.ui.stakes[s] = bb.stakes[s]);
     renderStakes(); renderPreview(); toast('copied the bot\'s stakes');
@@ -1120,7 +1143,21 @@ function renderConfig() {
 
 /* ---------------------------------------------------------------- boot */
 api('/api/config').then(d => { S.config = d.config; }).catch(() => {})
-  .then(() => refresh()).then(() => { populateSimSelects(); wire(); wireKeys(); wireTable(); })
+  .then(() => refresh()).then(() => {
+    // Each step is independently guarded. Wiring must never be all-or-nothing:
+    // one missing element used to abort everything after it, which is how the
+    // game screen became unreachable while the rest of the page looked fine.
+    const step = (label, fn) => {
+      try { fn(); } catch (err) {
+        WIRING.failed.push(label + ' (' + err.message + ')');
+        try { console.error('wiring failed:', label, err); } catch (e2) {}
+      }
+    };
+    step('simulation selects', populateSimSelects);
+    step('dashboard', wire);
+    step('keyboard', wireKeys);
+    step('game screen', wireTable);
+  })
   .then(() => {
     let m = 'table';
     try { m = localStorage.getItem(MODE_KEY) || 'table'; } catch (e) {}
@@ -1130,6 +1167,12 @@ api('/api/config').then(d => { S.config = d.config; }).catch(() => {})
     } catch (e) { S.ui.recordOnly = true; }
     setMode(m);
   }).catch(e => {
+  // Say what actually broke. The old wording blamed the engine for anything,
+  // including a missing button, which sent the reader looking in the wrong place.
+  const bits = [];
+  if (WIRING.failed.length) bits.push('parts of the screen did not start: ' + WIRING.failed.join('; '));
+  bits.push(e && e.message ? e.message : String(e));
   document.body.insertAdjacentHTML('afterbegin',
-    `<div class="callout" style="margin:16px">Cannot reach the engine: ${esc(e.message)}</div>`);
+    `<div class="callout" style="margin:16px">buzzcast could not start properly — ${esc(bits.join(' · '))}. `
+    + `The engine itself may be fine: try a reload, then <code>python tests.py</code>.</div>`);
 });

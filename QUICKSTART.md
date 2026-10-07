@@ -106,6 +106,35 @@ The strip shows it: `bot's paper trade +14.2% over 125 turns, p = 0.041 — not 
 When that turns into `proven`, the bot has earned the right to be followed, and
 you will not have risked anything to find out.
 
+### When do predictions actually appear?
+
+Three different things, at three different times. The screen shows all three.
+
+| when | what happens |
+|---|---|
+| **turn 15** | the bot starts showing a **read** — a favourite colour and a percentage. Before this it refuses an opinion. |
+| **the read climbs** | the strip shows `bot's read, last 40 turns: X% right`. Chance is 33%. This is the number to watch. |
+| **~turn 100–300** | on a game with a real edge, the read is clearly above chance and the bot's paper trade becomes significant. |
+| **never, on a fair game** | the read sits at 30–35% forever. That is the answer: there is nothing to predict. |
+
+The **read** is the honest early signal, because it needs no money and no proof —
+it is just "was the bot's favourite the colour that came up?". Measured over 300
+turns of recording-only:
+
+| the game | read at turn 50 | at turn 150 | at turn 300 |
+|---|---|---|---|
+| no pattern (fair) | 32% | 32% | 34% |
+| a mild bias | 44% | 40% | 41% |
+| strong momentum | 42% | 49% | 58% |
+
+So: **a big edge shows up in the read by turn 50–100. A thin one needs 200–300
+turns**, and sometimes stays invisible until you have 500+. On a fair game the
+read never moves, which is exactly what you want to find out cheaply.
+
+The **paper trade** is the stricter test, and it is what the bot uses to decide
+whether it is allowed to stake. It needs more data than the read — see the
+table below.
+
 ### How long does that take?
 
 Measured on 12 independent games per row, record-only:
@@ -266,6 +295,98 @@ python analyze.py turns.csv
 
 ---
 
+## Part 6 — Let it record for you (optional)
+
+If you can run the game in an **Android emulator on your laptop** (BlueStacks,
+LDPlayer, MuMu, or Android Studio's own emulator), the tool can watch the game's
+Trend screen and record every result by itself. There is no video recording and
+no timing to get right: the board shows the **last 50 results** and fills from
+the bottom right, so a screenshot every few seconds already contains everything.
+
+### Check the reader works, with no game at all
+
+```
+python capture.py --demo
+```
+
+It draws a pretend board, reads it back and reports. If that says
+`read 50 of 50 correctly`, the reader is fine.
+
+### Check it against your actual game
+
+1. Win + Shift + S to screenshot the Trend popup, save it as a **PNG**.
+2. ```
+   python capture.py --file shot.png --report
+   ```
+3. It prints the board as letters. **Compare them with your screen**, left to
+   right, top to bottom. If they match, everything else is configuration.
+
+   It should look like this (this is a real read of a real board):
+
+   ```
+   G R R G R R B B R B
+   B G R R B R G G G R
+   G G B G B G B G R R
+   R G G G R G B R R B
+   G B G G B R B G R G
+   ```
+
+### Set up the emulator feed
+
+**Preferred — straight from the emulator:**
+
+1. Turn on **ADB** in your emulator's settings (BlueStacks: Settings →
+   Advanced → Android Debug Bridge; LDPlayer and MuMu have the same switch).
+2. Run:
+   ```
+   python capture.py --adb --once --report
+   ```
+   If it shows the board, you are done. If it says it cannot find `adb`, pass
+   `--adb-path "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"`.
+
+**Fallback — capture a rectangle of the desktop:**
+
+```
+python capture.py --screens                                  (tells you the size)
+python capture.py --screen 300,200,1100,800 --once --report   (X,Y,W,H of the popup)
+```
+
+### Then let it run
+
+```
+python capture.py --adb --watch --interval 15
+```
+
+Leave it going. Every new result is recorded into buzzcast **as a pass** — the
+bankroll never moves, because this tool exists to gather evidence, not to bet.
+It keeps a log in `capture_log.txt` and remembers where it was in
+`capture_config.json`, so you can stop and restart it freely.
+
+Press **Ctrl+C** to stop, then look at the app: the turns are all there.
+
+### What it will and will not do
+
+| it does | it does not |
+|---|---|
+| read the board and record results | place any bet, ever |
+| survive one result, or fifteen, arriving between looks | guess when the board does not line up |
+| keep going for hours unattended | invent a result it cannot read |
+
+If the popup closes, or the game restarts, the board stops lining up with the
+last look and the script **refuses to record anything** until it does. That is
+deliberate: a wrong result is worse than a missing one.
+
+### What to do the first time
+
+Run it with **`--once`** and read the printed board against your screen *before*
+you leave it alone. The script is honest about failure — it prints `?` for a
+cell it could not read — but your eyes are the check that matters.
+
+> **A note on screen-sharing.** The script only reads the screenshot for the
+> three symbol colours; it stores nothing else and sends nothing anywhere. It
+> also refuses to read a JPEG, because a phone photo is not a reliable source,
+> whatever it looks like.
+
 ## Part 5 — Your other laptop (3 steps)
 
 **1. Install Python** from <https://www.python.org/downloads/>
@@ -304,6 +425,10 @@ game has memory.
 ---
 
 ## If something goes wrong
+
+**A button does nothing, or the page shows a banner saying something did not start?**
+Reload with **Ctrl+F5**. That forces the browser to refetch the page and its
+files rather than reusing anything it held on to.
 
 **Seeing `?` where a dash should be in the console?**
 That's your Windows console's code page, not a bug. It only affects decorative

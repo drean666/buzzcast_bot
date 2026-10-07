@@ -736,11 +736,20 @@ class Brain:
         _roi = self.roi_stats()
         n = self.n_obs
         hits = sum(1 for h in self.oos_hit if h)
+        # The rolling read: how often the model's favourite has actually come
+        # up over the last window of turns. Cumulative accuracy is dominated by
+        # the first hundred turns forever, so it cannot show a read improving -
+        # and "is the read working yet?" is the only question a person recording
+        # their first few hundred turns actually has.
+        _rw_n = min(self.window or 40, len(self.oos_hit))
+        _rw = 100.0 * sum(self.oos_hit[-_rw_n:]) / _rw_n if _rw_n else 0.0
         tot = sum(self.counts.values()) or 1.0
         return {
             "n_obs": n,
             "oos_hit_rate_pct": round(100.0 * hits / n, 2) if n else 0.0,
             "oos_hits": hits,
+            "read_hit_rate_pct": round(_rw, 2),
+            "read_window": _rw_n,
             "chance_pct": round(100.0 * self.uniform, 2),
             "contexts_learned": sum(t.contexts() for t in self.tables),
             "log_loss_bits": round(-sum(self.oos_logp) / n, 4) if n else round(math.log(self.k) / LOG2, 4),

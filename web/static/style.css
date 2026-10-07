@@ -219,7 +219,13 @@ body.table-mode #table-view { display: block; }
 .tv-stage .step { font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--mut); white-space: nowrap; }
 .tv-stage .what { font-size: 14px; font-weight: 600; }
 .tv-stage .why  { font-size: 12px; color: var(--mut); }
-.tv-stage .paper { margin-left: auto; font-size: 12px; text-align: right; white-space: nowrap; }
+.tv-stage .paper { font-size: 12px; text-align: right; white-space: nowrap; }
+.tv-stage .paper:first-of-type { margin-left: auto; }
+.tv-stage .paper + .paper { margin-left: 18px; padding-left: 18px; border-left: 1px solid var(--line); }
+@media (max-width: 900px) {
+  .tv-stage .paper { margin-left: 0; text-align: left; }
+  .tv-stage .paper + .paper { margin-left: 0; padding-left: 0; border-left: 0; }
+}
 .tv-track { display: flex; gap: 3px; margin-top: 4px; }
 .tv-track i { width: 22px; height: 4px; border-radius: 2px; background: #232b38; display: block; }
 .tv-track i.on { background: var(--acc); }
